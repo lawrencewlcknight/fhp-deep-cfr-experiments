@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fhp-deep-cfr"
+version = "0.1.0"
+description = "Deep CFR experiments on flop hold'em poker (FHP)."
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+authors = [{ name = "Lawrence Knight" }]
+license = { text = "MIT" }
+
+[tool.setuptools.packages.find]
+include = ["deep_cfr_poker*", "experiments*"]
+exclude = ["outputs*", "tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+  "smoke: end-to-end smoke tests that load OpenSpiel and PyTorch",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]  # line length is enforced by formatter, not lint

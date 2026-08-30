@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+venv/*
+!venv/PLACEHOLDER.md
+.env
+.venv/
+
+# Experiment outputs
+outputs/*
+!outputs/.gitkeep
+cloud_outputs/
+chart_exports/
+
+# Heavy or scratch experiment artifacts
+*.pt
+*.pth
+*.npz
+*.log
+failed_seeds.json
+failed_runs.json
+checkpoints/
+snapshots/
+traces/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
