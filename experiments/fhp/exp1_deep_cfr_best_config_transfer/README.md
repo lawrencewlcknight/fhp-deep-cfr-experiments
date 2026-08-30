@@ -57,6 +57,9 @@ python -m experiments.fhp.exp1_deep_cfr_best_config_transfer.run
 
 ## Google Cloud Batch
 
+For first-time project, bucket, IAM, logging, monitoring, and retrieval setup,
+follow [`docs/GCP_BATCH_EXPERIMENTS.md`](../../../docs/GCP_BATCH_EXPERIMENTS.md).
+
 After publishing this local repository to the launcher's default repository URL
 (or setting `REPO_URL` to its published location), set `PROJECT_ID`, `REGION`,
 `BUCKET`, and `SA_EMAIL`:

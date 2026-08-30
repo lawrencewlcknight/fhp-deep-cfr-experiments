@@ -36,6 +36,10 @@ Cloud Batch command are documented in
 `experiments/fhp/exp1_deep_cfr_best_config_transfer/README.md`. The full
 training run has not been started.
 
+For complete project setup, IAM, smoke testing, monitoring, logs, output
+retrieval, resource sizing, and cleanup instructions, see
+`docs/GCP_BATCH_EXPERIMENTS.md`.
+
 ## Setup
 
 ```bash
