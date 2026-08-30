@@ -24,13 +24,17 @@ exact two-player, two-round limit configuration:
 This contract is pinned in `deep_cfr_poker/game.py` and matches the existing
 FHP repository in this workspace, including its VR-Deep provenance commit.
 
-## Repository state
+## Experiment 1
 
-This is a clean experiment series. There are no inherited training outputs,
-experiment results, checkpoints, charts, or experiment-number history.
+Experiment 1 transfers the approved best validated Deep CFR configuration to
+FHP over five fixed seeds. It uses 1,050 iterations, 320 traversals per player,
+the `2x32` policy network, the residual LayerNorm centred-advantage `8x32`
+network, and the approved optimiser, replay, and policy-fitting settings.
 
-Experiment 1 is intentionally reserved until its proposed configuration has
-been reviewed and approved. No training run has been started.
+The implementation, smoke command, full command, output contract, and Google
+Cloud Batch command are documented in
+`experiments/fhp/exp1_deep_cfr_best_config_transfer/README.md`. The full
+training run has not been started.
 
 ## Setup
 

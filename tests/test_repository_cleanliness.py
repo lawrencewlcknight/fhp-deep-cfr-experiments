@@ -19,13 +19,13 @@ def test_no_stale_variant_references():
     assert offenders == []
 
 
-def test_no_committed_experiment_history_or_outputs():
+def test_only_approved_experiment_and_no_outputs():
     experiment_children = sorted(
         path.name
         for path in (ROOT / "experiments" / "fhp").iterdir()
         if path.name not in {"__init__.py", "__pycache__"}
     )
-    assert experiment_children == []
+    assert experiment_children == ["exp1_deep_cfr_best_config_transfer"]
 
     output_children = sorted(path.name for path in (ROOT / "outputs").iterdir())
     assert output_children == [".gitkeep"]

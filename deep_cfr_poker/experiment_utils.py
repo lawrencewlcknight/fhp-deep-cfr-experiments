@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Iterable, List, Mapping, Optional, Sequence
 
 import numpy as np
+import pyspiel
 import torch
 from scipy import stats
 
@@ -26,6 +27,7 @@ from .constants import (
 )
 from .game import load_game
 from .seeding import set_seed
+from .snapshots import package_full_checkpoint_filename, package_snapshot_filename
 from .solver import DeepCFRSolver, SolveResult
 
 
@@ -216,6 +218,38 @@ def final_window_std(values, window: int = DEFAULT_FINAL_WINDOW) -> float:
     return float(np.std(window_values, ddof=1)) if window_values.size > 1 else 0.0
 
 
+def finite_min(values) -> float:
+    """Return the minimum finite value, or NaN when none are available."""
+    values = np.asarray(values, dtype=np.float64)
+    finite = values[np.isfinite(values)]
+    return float(np.min(finite)) if finite.size else float("nan")
+
+
+def column_finite_mean(matrix: np.ndarray) -> np.ndarray:
+    """Column means that stay quiet when a metric is intentionally unavailable."""
+    matrix = np.asarray(matrix, dtype=np.float64)
+    finite = np.isfinite(matrix)
+    counts = np.sum(finite, axis=0)
+    sums = np.sum(np.where(finite, matrix, 0.0), axis=0)
+    return np.divide(
+        sums,
+        counts,
+        out=np.full(counts.shape, np.nan, dtype=np.float64),
+        where=counts > 0,
+    )
+
+
+def column_finite_sem(matrix: np.ndarray) -> np.ndarray:
+    """Column standard errors, returning NaN for fewer than two observations."""
+    matrix = np.asarray(matrix, dtype=np.float64)
+    output = np.full(matrix.shape[1], np.nan, dtype=np.float64)
+    for index in range(matrix.shape[1]):
+        finite = matrix[:, index][np.isfinite(matrix[:, index])]
+        if finite.size > 1:
+            output[index] = np.std(finite, ddof=1) / np.sqrt(finite.size)
+    return output
+
+
 def normalised_auc(x_values, y_values) -> float:
     """Computes area under ``y`` over ``x`` divided by the x-range."""
     x_values = np.asarray(x_values, dtype=np.float64)
@@ -236,6 +270,8 @@ def run_single_seed(
     config: dict,
     export_dir: Optional[Path] = None,
     save_final_checkpoint: bool = False,
+    final_checkpoint_include_buffers: bool = True,
+    policy_snapshot_iterations: Optional[Sequence[int]] = None,
     final_window: int = DEFAULT_FINAL_WINDOW,
 ) -> dict:
     """Runs one fixed-budget Deep CFR training run for a single seed."""
@@ -253,9 +289,73 @@ def run_single_seed(
         solver = make_solver(game, config)
         solver_initialization_seconds = time.perf_counter() - solver_init_start
 
+        snapshot_schedule = {
+            int(iteration) for iteration in (policy_snapshot_iterations or ())
+        }
+        snapshot_rows = []
+        if snapshot_schedule and export_dir is None:
+            raise ValueError("export_dir is required when policy snapshots are enabled")
+
+        def save_requested_snapshot(active_solver, completed_iteration: int) -> None:
+            if completed_iteration not in snapshot_schedule:
+                return
+            snapshot_dir = Path(export_dir) / "snapshots"
+            snapshot_dir.mkdir(parents=True, exist_ok=True)
+            snapshot_path = snapshot_dir / package_snapshot_filename(
+                seed, completed_iteration
+            )
+            active_solver.save_policy_snapshot(
+                snapshot_path,
+                seed=seed,
+                target_iteration=completed_iteration,
+                stage_label=f"FHP training checkpoint {completed_iteration}",
+                experiment_name=str(config["experiment_name"]),
+                game_name=str(config["game_name"]),
+                solver_config=dict(config),
+            )
+            snapshot_rows.append(
+                {
+                    "seed": int(seed),
+                    "checkpoint_iteration": int(completed_iteration),
+                    "nodes_touched": int(active_solver._nodes_touched),
+                    "policy_training_events": int(
+                        active_solver._policy_training_events
+                    ),
+                    "policy_gradient_steps": int(
+                        active_solver._policy_gradient_steps
+                    ),
+                    "strategy_buffer_size": int(
+                        len(active_solver._strategy_memories)
+                    ),
+                    "advantage_buffer_size_player_0": int(
+                        len(active_solver._advantage_memories[0])
+                    ),
+                    "advantage_buffer_size_player_1": int(
+                        len(active_solver._advantage_memories[1])
+                    ),
+                    "policy_snapshot": str(snapshot_path),
+                }
+            )
+            manifest_path = snapshot_dir / f"seed_{int(seed)}_manifest.json"
+            with open(manifest_path, "w", encoding="utf-8") as handle:
+                json.dump(json_safe(snapshot_rows), handle, indent=2)
+
         solve_start = time.perf_counter()
-        solve_result: SolveResult = solver.solve()
+        solve_result: SolveResult = solver.solve(
+            post_iteration_callback=(
+                save_requested_snapshot if snapshot_schedule else None
+            )
+        )
         elapsed_seconds = time.perf_counter() - solve_start
+
+        captured_snapshots = {
+            int(row["checkpoint_iteration"]) for row in snapshot_rows
+        }
+        missing_snapshots = sorted(snapshot_schedule - captured_snapshots)
+        if missing_snapshots:
+            raise RuntimeError(
+                f"Training completed without requested snapshots at {missing_snapshots}"
+            )
 
         convs = solve_result.nash_conv
         nodes_touched = solve_result.nodes_touched
@@ -297,7 +397,7 @@ def run_single_seed(
                 diagnostics.get("cumulative_traversal_collection_seconds", [float("nan")])[-1]
             ),
             "final_exploitability": float(exploitability_curve[-1]),
-            "best_exploitability": float(np.nanmin(exploitability_curve)),
+            "best_exploitability": finite_min(exploitability_curve),
             "final_window_mean_exploitability": final_window_mean(
                 exploitability_curve, window=final_window
             ),
@@ -308,7 +408,7 @@ def run_single_seed(
             "final_policy_value_error": float(
                 abs(final_policy_value - value_target)
             ),
-            "best_policy_value_error": float(np.nanmin(value_error)),
+            "best_policy_value_error": finite_min(value_error),
             "final_nodes_touched": float(nodes_touched[-1]),
             "final_wall_clock_seconds": float(wall_clock[-1]),
             "nodes_to_exploitability_threshold": first_nodes_to_threshold(
@@ -363,14 +463,16 @@ def run_single_seed(
             "policy_value_error": value_error,
             "diagnostics": diagnostics,
             "summary": summary,
+            "policy_snapshots": snapshot_rows,
         }
 
         if save_final_checkpoint and export_dir is not None:
             checkpoint_dir = Path(export_dir) / "checkpoints"
             checkpoint_dir.mkdir(parents=True, exist_ok=True)
-            torch.save(
-                solver.extract_full_model(),
-                checkpoint_dir / f"seed_{seed}_final_model.pt",
+            solver.save_full_model(
+                checkpoint_dir
+                / package_full_checkpoint_filename(seed, int(config["num_iterations"])),
+                include_buffers=bool(final_checkpoint_include_buffers),
             )
 
         return result
@@ -896,14 +998,10 @@ def export_results(
                 nodes_touched=nodes_mat,
                 wall_clock_seconds=wall_clock_mat,
                 cumulative_traversal_collection_seconds=traversal_collection_mat,
-                mean_exploitability=np.nanmean(exploitability_mat, axis=0),
-                se_exploitability=stats.sem(
-                    exploitability_mat, axis=0, nan_policy="omit"
-                ),
-                mean_policy_value_error=np.nanmean(value_error_mat, axis=0),
-                se_policy_value_error=stats.sem(
-                    value_error_mat, axis=0, nan_policy="omit"
-                ),
+                mean_exploitability=column_finite_mean(exploitability_mat),
+                se_exploitability=column_finite_sem(exploitability_mat),
+                mean_policy_value_error=column_finite_mean(value_error_mat),
+                se_policy_value_error=column_finite_sem(value_error_mat),
             )
 
     return {

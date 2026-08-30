@@ -10,7 +10,9 @@ export DEBIAN_FRONTEND=noninteractive
 #     MACHINE_TYPE \
 #     MAX_RUN_SECONDS \
 #     CPU_MILLI \
-#     MEMORY_MIB
+#     MEMORY_MIB \
+#     BOOT_DISK_SIZE_GB \
+#     BOOT_DISK_TYPE
 #
 # Examples:
 #   n2-standard-2: CPU_MILLI=2000 MEMORY_MIB=8000
@@ -27,6 +29,8 @@ MACHINE_TYPE="${3:-n2-standard-4}"
 MAX_RUN_SECONDS="${4:-21600}"
 CPU_MILLI="${5:-4000}"
 MEMORY_MIB="${6:-16000}"
+BOOT_DISK_SIZE_GB="${7:-100}"
+BOOT_DISK_TYPE="${8:-pd-balanced}"
 REPO_URL="${REPO_URL:-https://github.com/lawrencewlcknight/fhp-poker-deep-cfr-experiments.git}"
 REPO_REF="${REPO_REF:-main}"
 
@@ -59,6 +63,8 @@ export MACHINE_TYPE
 export MAX_RUN_SECONDS
 export CPU_MILLI
 export MEMORY_MIB
+export BOOT_DISK_SIZE_GB
+export BOOT_DISK_TYPE
 export BUCKET
 export SA_EMAIL
 export JOB_JSON
@@ -78,6 +84,8 @@ machine_type = os.environ["MACHINE_TYPE"]
 max_run_seconds = os.environ["MAX_RUN_SECONDS"]
 cpu_milli = int(os.environ["CPU_MILLI"])
 memory_mib = int(os.environ["MEMORY_MIB"])
+boot_disk_size_gb = int(os.environ["BOOT_DISK_SIZE_GB"])
+boot_disk_type = os.environ["BOOT_DISK_TYPE"]
 bucket = os.environ["BUCKET"]
 service_account = os.environ["SA_EMAIL"]
 repo_url = os.environ["REPO_URL"]
@@ -95,6 +103,8 @@ echo "Starting job: {job_name}"
 echo "Experiment command: {experiment_command}"
 echo "Requested CPU milli: {cpu_milli}"
 echo "Requested memory MiB: {memory_mib}"
+echo "Requested boot disk GiB: {boot_disk_size_gb}"
+echo "Requested boot disk type: {boot_disk_type}"
 
 if command -v sudo >/dev/null 2>&1; then
   SUDO=sudo
@@ -270,6 +280,10 @@ job = {
                 "policy": {
                     "machineType": machine_type,
                     "provisioningModel": "STANDARD",
+                    "bootDisk": {
+                        "sizeGb": boot_disk_size_gb,
+                        "type": boot_disk_type,
+                    },
                 }
             }
         ],
@@ -288,6 +302,8 @@ echo "Machine type: ${MACHINE_TYPE}"
 echo "Max run duration: ${MAX_RUN_SECONDS}s"
 echo "CPU milli: ${CPU_MILLI}"
 echo "Memory MiB: ${MEMORY_MIB}"
+echo "Boot disk GiB: ${BOOT_DISK_SIZE_GB}"
+echo "Boot disk type: ${BOOT_DISK_TYPE}"
 echo "Job config: ${JOB_JSON}"
 
 echo
