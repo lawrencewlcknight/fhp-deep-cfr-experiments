@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
-import csv
 from pathlib import Path
 
 import numpy as np
@@ -25,33 +24,16 @@ def summary(values):
                 ci95_high=mean + margin if margin is not None else None)
 
 
-def cluster_crossplay(rows):
-    left = sorted({r["training_seed"] for r in rows})
-    right = sorted({r["comparator_seed"] for r in rows})
-    lookup = {(r["training_seed"], r["comparator_seed"]): r["mean_mbb_per_hand"] for r in rows}
-    if len(lookup) != len(rows) or len(rows) != len(left) * len(right):
-        raise ValueError("Expected complete unique cross-seed matrix")
-    values = np.array([[lookup[a, b] for b in right] for a in left])
-    rng = np.random.default_rng(20260922)
-    a = rng.integers(len(left), size=(10000, len(left)))
-    b = rng.integers(len(right), size=(10000, len(right)))
-    draws = values[a[:, :, None], b[:, None, :]].mean(axis=(1, 2))
-    interval = np.quantile(draws, [.025, .975])
-    return dict(mean_mbb_per_hand=float(values.mean()), ci95_low=float(interval[0]),
-                ci95_high=float(interval[1]), sd_training_seeds=len(left), ucv_training_seeds=len(right),
-                matchups=len(rows), positive_matchups=int((values > 0).sum()),
-                bootstrap_draws=10000, inference="exploratory_two_way_training_seed_cluster_bootstrap")
-
-
-def evaluation_report(results, sd, ucv, output, *, reference_root=None, smoke=False):
+def evaluation_report(results, sd, output, *, smoke=False):
     output = Path(output)
+    if any(item["task"]["kind"] not in {"rule", "lbr", "temporal"} for item in results):
+        raise ValueError("Only standalone SD-CFR evaluation tasks are supported")
     rows = [dict(**{k: v for k, v in item["task"].items() if not k.startswith("path_")},
                  **item["result"], evaluation_seconds=item["elapsed_seconds"], experiment="sd_cfr_exp2")
             for item in results]
     write_csv(output / "evaluation_tasks.csv", rows)
     rule = [r for r in rows if r["kind"] == "rule"]
     temporal = [r for r in rows if r["kind"] == "temporal"]
-    direct = [r for r in rows if r["kind"] == "direct"]
     grouped = defaultdict(list)
     for row in rows:
         if row["kind"] == "lbr":
@@ -63,15 +45,6 @@ def evaluation_report(results, sd, ucv, output, *, reference_root=None, smoke=Fa
                         kind="lbr", num_deals=int(counts.sum()),
                         mean_mbb_per_hand=float(np.average([s["mean_mbb_per_hand"] for s in shards], weights=counts)),
                         interpretation="sampled_LBR_value_not_exact_exploitability"))
-    if reference_root:
-        for name, destination in (("rule_agent_by_seed.csv", rule), ("lbr_by_seed.csv", lbr)):
-            with (Path(reference_root) / name).open() as stream:
-                for row in csv.DictReader(stream):
-                    if row["experiment"] == "exp1":
-                        destination.append(dict(row, experiment="ucv_exp1",
-                                                training_seed=int(row["training_seed"]),
-                                                training_hours=int(row["training_hours"]),
-                                                mean_mbb_per_hand=float(row["mean_mbb_per_hand"])))
     write_csv(output / "rule_agent_by_seed.csv", rule)
     write_csv(output / "lbr_by_seed.csv", lbr)
     agent_groups = defaultdict(list)
@@ -80,16 +53,13 @@ def evaluation_report(results, sd, ucv, output, *, reference_root=None, smoke=Fa
     write_csv(output / "rule_agent_aggregate.csv", [dict(experiment=e, training_hours=h, opponent=o, **summary(v))
               for (e, h, o), v in sorted(agent_groups.items())])
     write_csv(output / "temporal_crossplay_by_seed.csv", temporal)
-    if direct:
-        write_csv(output / "direct_crossplay_by_seed.csv", direct)
-        write_json(output / "direct_crossplay_summary.json", cluster_crossplay(direct))
     rule_seed = defaultdict(list)
     for r in rule:
         rule_seed[r["experiment"], r["training_seed"], r["training_hours"]].append(r["mean_mbb_per_hand"])
     mean_rule = [dict(experiment=e, training_seed=s, training_hours=h, mean_mbb_per_hand=float(np.mean(v)))
                  for (e, s, h), v in sorted(rule_seed.items())]
     write_csv(output / "rule_agent_mean_by_seed.csv", mean_rule)
-    indexes = {(r["experiment"], r["seed"], r["training_hours"]): r for r in sd + ucv}
+    indexes = {(r["experiment"], r["seed"], r["training_hours"]): r for r in sd}
     aggregates = []
     for metric, data in (("rule_agent_mean", mean_rule), ("lbr", lbr)):
         groups = defaultdict(list)
@@ -112,25 +82,6 @@ def evaluation_report(results, sd, ucv, output, *, reference_root=None, smoke=Fa
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    if direct:
-        matrix = np.array([[next(r["mean_mbb_per_hand"] for r in direct
-                                  if r["training_seed"] == a and r["comparator_seed"] == b)
-                            for b in sorted({r["comparator_seed"] for r in direct})]
-                           for a in sorted({r["training_seed"] for r in direct})])
-        fig, axis = plt.subplots(figsize=(6, 4))
-        limit = max(float(np.abs(matrix).max()), 1.0)
-        plot = axis.imshow(matrix, cmap="RdBu", vmin=-limit, vmax=limit)
-        for (i, j), value in np.ndenumerate(matrix):
-            axis.text(j, i, f"{value:.1f}", ha="center", va="center")
-        axis.set(xlabel="UCV training seed", ylabel="SD-CFR training seed",
-                 xticks=range(matrix.shape[1]), yticks=range(matrix.shape[0]),
-                 title="24-hour head-to-head; positive favours SD-CFR")
-        fig.colorbar(plot, ax=axis, label="mbb/hand")
-        if smoke:
-            fig.suptitle("SMOKE TEST — not production performance")
-        fig.tight_layout()
-        fig.savefig(output / "sd_cfr_vs_ucv_head_to_head.png", dpi=180)
-        plt.close(fig)
     fig, axis = plt.subplots(figsize=(8, 4))
     pairs = sorted(temporal_groups)
     stats = [summary(temporal_groups[pair]) for pair in pairs]
@@ -161,11 +112,11 @@ def evaluation_report(results, sd, ucv, output, *, reference_root=None, smoke=Fa
         fig.savefig(output / f"policy_quality_by_{xkey}.png", dpi=180)
         plt.close(fig)
     (output / "interpretation.txt").write_text(
-        "Independent historical cohorts, not paired training. Error bars use training seeds, not hands.\n"
+        "Standalone SD-CFR evaluation; no cross-algorithm comparisons are included.\n"
+        "Error bars use independent training seeds, not hands; temporal matchups are paired within seed.\n"
         "LBR is a sampled lower-bound diagnostic, not exact exploitability or a convergence certificate.\n"
-        "Active time excludes checkpoint overhead; UCV also excluded its average-policy fitting.\n"
-        "Node curves join checkpoint means; algorithms count different interaction work.\n"
-        "Direct crossplay intervals resample each method's seeds independently, not the nine shared-policy cells.\n")
+        "Active time excludes checkpoint overhead. Node curves join observed checkpoint means.\n"
+        "Playable checkpoints and evaluator provenance are retained for later comparative analysis.\n")
 
 
 def training_report(source, output):

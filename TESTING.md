@@ -15,8 +15,10 @@ Experiment 2 tests additionally cover the three-seed/time-budget contract,
 lossless disk archive parity and bounded storage, immutable prefix reloads,
 checkpoint-clock exclusion, own-reach mixture equivalence (including a case
 where a naive pointwise average is provably wrong), independent per-hand
-strategy draws, retrospective deal streams, all nine cross-seed matchups,
-seed-cluster inference, comparative reporting and generated Batch shell syntax.
+strategy draws, retrospective deal streams, standalone rule/LBR/temporal
+reporting and generated Batch shell syntax. Launcher regressions check that
+training and evaluation-only submission never require comparator files, even
+when old UCV run-ID environment variables remain set.
 
 ```bash
 python -m pytest -q tests/test_exp2_sd_cfr_24h.py
@@ -25,6 +27,7 @@ bash gcp/run_exp2_sd_cfr_24h.sh smoke-local
 
 The cloud gate additionally reruns the six-iteration implementation audit on
 seeds 0/1/2 (one repeat), touches production-capacity replay, reloads a 10,000-
-iteration synthetic archive, and smoke-tests the real UCV comparator policies.
+iteration synthetic archive, and smoke-tests SD-CFR rule/LBR/temporal evaluation
+using its own short training outputs. It does not download any other experiment.
 These checks cannot establish 24-hour speed, policy quality or real-archive
 evaluation cost in advance; the experiment measures them.

@@ -15,8 +15,6 @@ LBR_ROLLOUTS = 4096
 CROSSPLAY_DEALS = 50000
 REFERENCE_VM = dict(machine_type="n2-standard-8", vcpus=8, memory_gib=32,
                     disk_gib=200, provisioning="STANDARD")
-UCV_RUN_ID = "exp1-fhp-20260923-233627"
-UCV_EVAL_RUN_ID = "fhp-eval123-20260925-103616"
 
 
 def solver_config(smoke=False):

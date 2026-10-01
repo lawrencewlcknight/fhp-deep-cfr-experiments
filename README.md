@@ -46,8 +46,10 @@ networks are stored once in bounded-memory chunks; no full replay dumps are
 retained. The output is the historical mixture, never the final network alone.
 
 The cloud workflow runs equivalence, capacity and evaluator smoke checks,
-then training, aggregation, an evaluation-cost profile, and sampled evaluation
-against the existing UCV Experiment 1. LBR uses the exact own-reach mixture
+then training, aggregation, an evaluation-cost profile, and standalone rule-agent,
+LBR and temporal head-to-head evaluation. No UCV checkpoints, previous evaluation
+outputs or cross-bucket access are required; cross-algorithm comparisons are deferred.
+LBR uses the exact own-reach mixture
 at queried histories, without enumerating the game tree. A failed cost gate
 preserves all training outputs and stops before full evaluation.
 

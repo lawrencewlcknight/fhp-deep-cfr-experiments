@@ -165,18 +165,19 @@ def test_time_budget_excludes_pauses_without_restarting_learner():
     assert solver._iteration == 4
 
 
-def test_production_evaluation_plan_and_correct_ucv_protocol():
+def test_standalone_production_evaluation_plan_preserves_protocol():
     from experiments.fhp.exp2_sd_cfr_24h.evaluate import make_tasks
     records = [dict(seed=s, training_hours=h, path=f"sd-{s}-{h}", sha256="abc", nodes_touched=1)
                for s in SEEDS for h in HOURS]
-    ucv = [dict(r, path=r["path"].replace("sd", "ucv")) for r in records]
-    tasks = make_tasks(records, ucv)
-    assert len({t["task_id"] for t in tasks}) == len(tasks) == 1287
+    tasks = make_tasks(records)
+    assert len({t["task_id"] for t in tasks}) == len(tasks) == 1278
     assert sum(t["kind"] == "rule" for t in tasks) == 60
     assert sum(t["kind"] == "lbr" for t in tasks) == 1200
     assert sum(t["kind"] == "temporal" for t in tasks) == 18
-    assert sum(t["kind"] == "direct" for t in tasks) == 9
-    assert {t["num_deals"] for t in tasks if t["kind"] == "direct"} == {50000}
+    assert {t["kind"] for t in tasks} == {"rule", "lbr", "temporal"}
+    assert {t["num_deals"] for t in tasks if t["kind"] == "temporal"} == {50000}
+    assert {t["num_deals"] for t in tasks if t["kind"] == "rule"} == {10000}
+    assert {t["num_deals"] for t in tasks if t["kind"] == "lbr"} == {10}
     assert {t["lbr_rollouts"] for t in tasks if t["kind"] == "lbr"} == {4096}
     # Identical rule/deal streams across checkpoints and all training seeds.
     assert {t["evaluation_seed"] for t in tasks if t.get("opponent") == "candid_statistician"} == {20360922}
@@ -192,8 +193,7 @@ def test_batch_contract_and_scripts_parse(tmp_path):
     spec.loader.exec_module(builder)
     args = SimpleNamespace(project="test", region="europe-west1", bucket="gs://test",
                            service_account="runner@test.iam.gserviceaccount.com", repo_ref="a" * 40,
-                           run_id="sdcfr2-test", start_stage="smoke", ucv_run_id="ucv1",
-                           ucv_eval_run_id="ucveval", eval_max_hours=36)
+                           run_id="sdcfr2-test", start_stage="smoke", eval_max_hours=36)
     for stage in ("controller",) + builder.STAGES:
         job = builder.build_job(args, stage)
         group = job["taskGroups"][0]
@@ -202,23 +202,41 @@ def test_batch_contract_and_scripts_parse(tmp_path):
         assert group["taskCountPerNode"] == 1
         assert group["taskSpec"]["maxRetryCount"] == 0  # no fake policy-only training resume
         path = tmp_path / f"{stage}.sh"
-        path.write_text(group["taskSpec"]["runnables"][0]["script"]["text"])
+        script = group["taskSpec"]["runnables"][0]["script"]["text"]
+        assert "ucv" not in script.lower()
+        assert "reference-analysis" not in script
+        path.write_text(script)
         subprocess.run(["bash", "-n", str(path)], check=True)
     train = builder.build_job(args, "train")
     assert train["allocationPolicy"]["instances"][0]["policy"]["machineType"] == "n2-standard-8"
     assert train["taskGroups"][0]["taskSpec"]["maxRunDuration"] == "129600s"
 
 
-def test_two_way_bootstrap_does_not_treat_cells_as_independent():
-    from experiments.fhp.exp2_sd_cfr_24h.report import cluster_crossplay
-    rows = [dict(training_seed=a, comparator_seed=b, mean_mbb_per_hand=float(a - b))
-            for a in SEEDS for b in SEEDS]
-    result = cluster_crossplay(rows)
-    assert result["mean_mbb_per_hand"] == 0
-    assert result["sd_training_seeds"] == result["ucv_training_seeds"] == 3
-    assert result["matchups"] == 9
-    with pytest.raises(ValueError, match="complete unique"):
-        cluster_crossplay(rows[:-1])
+@pytest.mark.parametrize("action,stage", [("run", "smoke"), ("evaluate-only", "profile")])
+def test_launch_does_not_require_comparator_objects(monkeypatch, action, stage):
+    import importlib.util
+    import sys
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("standalone_builder", root / "gcp/exp2_sd_cfr_24h_batch.py")
+    builder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(builder)
+    # Old terminal exports must not reintroduce comparator dependencies.
+    monkeypatch.setenv("UCV_EXP1_RUN_ID", "nonexistent-ucv")
+    monkeypatch.setenv("UCV_EVAL_RUN_ID", "nonexistent-evaluation")
+    monkeypatch.setattr(sys, "argv", ["batch.py", action, "--project", "test", "--region", "europe-west1",
+                                    "--bucket", "standalone-results", "--service-account", "runner@test",
+                                    "--repo-ref", "a" * 40, "--run-id", "sdcfr2-test"])
+    calls = []
+    monkeypatch.setattr(builder, "cloud", lambda args, *command, **kwargs: calls.append(command))
+    def submit(args, name, **kwargs):
+        assert args.start_stage == stage
+        assert args.bucket == "gs://standalone-results"
+        assert not any(key.startswith("UCV_") for key in builder.environment(args))
+        calls.append(("submit", name))
+        return "test-controller"
+    monkeypatch.setattr(builder, "submit", submit)
+    builder.main()
+    assert calls == [("iam", "service-accounts", "describe", "runner@test"), ("submit", "controller")]
 
 
 def test_behavioural_mixture_is_not_pointwise_average_and_prefix_is_immutable(tmp_path):
@@ -266,32 +284,65 @@ def test_retrospective_deal_layout_matches_completed_ucv_analysis(monkeypatch):
     assert observed == [tuple(pair) for pair in zip(chance, actions) for _ in range(2)]
 
 
-def test_reference_comparison_tables_with_completed_analysis(tmp_path):
-    # Exercise import/aggregation without requiring bulky historical policies.
+def test_standalone_tables_and_charts_without_comparator_data(tmp_path):
     import csv
     from experiments.fhp.exp2_sd_cfr_24h.report import evaluation_report
     from experiments.fhp.exp2_sd_cfr_24h.evaluate import make_tasks
     records = [dict(experiment="sd_cfr_exp2", seed=s, training_hours=h, path=f"sd-{s}-{h}",
                     sha256="abc", nodes_touched=100000 * h) for s in SEEDS for h in HOURS]
-    ucv = [dict(r, experiment="ucv_exp1", path=r["path"].replace("sd", "ucv")) for r in records]
-    reference = tmp_path / "reference"
-    reference.mkdir()
-    from experiments.fhp.exp2_sd_cfr_24h.train import write_csv
-    from fhp_evaluation.rule_agents import PUBLISHED_AGENT_NAMES
-    reference_rows = [dict(experiment="exp1", training_seed=s, training_hours=h, opponent=o,
-                           mean_mbb_per_hand=20.) for s in SEEDS for h in HOURS for o in PUBLISHED_AGENT_NAMES]
-    write_csv(reference / "rule_agent_by_seed.csv", reference_rows)
-    write_csv(reference / "lbr_by_seed.csv", [dict(experiment="exp1", training_seed=s, training_hours=h,
-                                                   mean_mbb_per_hand=50.) for s in SEEDS for h in HOURS])
     results = [dict(task=task, result=dict(mean_mbb_per_hand=10.), elapsed_seconds=.1)
-               for task in make_tasks(records, ucv)]
+               for task in make_tasks(records)]
     output = tmp_path / "analysis"
     output.mkdir()
-    evaluation_report(results, records, ucv, output, reference_root=reference)
+    evaluation_report(results, records, output)
     with (output / "quality_aggregate.csv").open() as stream:
         aggregate = list(csv.DictReader(stream))
-    assert len(aggregate) == 16
+    assert len(aggregate) == 8
+    assert {r["experiment"] for r in aggregate} == {"sd_cfr_exp2"}
     assert {r["n"] for r in aggregate} == {"3"}
     with (output / "lbr_by_seed.csv").open() as stream:
-        assert len(list(csv.DictReader(stream))) == 24
-    assert (output / "sd_cfr_vs_ucv_head_to_head.png").exists()
+        rows = list(csv.DictReader(stream))
+        assert len(rows) == 12
+        assert {r["num_deals"] for r in rows} == {"1000"}
+    with (output / "rule_agent_by_seed.csv").open() as stream:
+        assert len(list(csv.DictReader(stream))) == 60
+    with (output / "temporal_crossplay_by_seed.csv").open() as stream:
+        assert len(list(csv.DictReader(stream))) == 18
+    assert (output / "temporal_head_to_head.png").exists()
+    assert (output / "policy_quality_by_training_hours.png").exists()
+    assert (output / "policy_quality_by_mean_nodes.png").exists()
+    assert not list(output.glob("*ucv*"))
+    assert not list(output.glob("direct_*"))
+    with pytest.raises(ValueError, match="standalone"):
+        evaluation_report([dict(task=dict(kind="direct"))], records, output)
+
+
+def test_production_profile_and_evaluation_cli_need_only_own_checkpoints(tmp_path, monkeypatch):
+    import sys
+    from experiments.fhp.exp2_sd_cfr_24h import evaluate
+    records = [dict(experiment="sd_cfr_exp2", seed=s, training_hours=h, path=f"sd-{s}-{h}",
+                    sha256="abc", nodes_touched=100000 * h) for s in SEEDS for h in HOURS]
+    source = tmp_path / "own_checkpoints"
+    output = tmp_path / "evaluation"
+    def index(root, *, smoke=False):
+        assert root == source and not smoke
+        return records
+    def run_tasks(tasks, output, *, workers):
+        assert workers == 8
+        assert {task["kind"] for task in tasks} == {"rule", "lbr", "temporal"}
+        assert all(task["path_a"].startswith("sd-") for task in tasks)
+        return [dict(task=task, result=dict(mean_mbb_per_hand=10.), elapsed_seconds=.001)
+                for task in tasks]
+    monkeypatch.setattr(evaluate, "checkpoint_index", index)
+    monkeypatch.setattr(evaluate, "run_tasks", run_tasks)
+    for mode in ("profile", "run"):
+        monkeypatch.setattr(sys, "argv", ["evaluate.py", mode, "--source", str(source), "--output", str(output)])
+        evaluate.main()
+    profile = json.loads((output / "evaluation_profile.json").read_text())
+    assert profile["passed"]
+    assert set(profile["seconds_per_pair"]) == {"rule", "lbr", "temporal"}
+    manifest = json.loads((output / "evaluation_manifest.json").read_text())
+    assert manifest["status"] == "complete"
+    assert manifest["evaluation_scope"] == "standalone_sd_cfr"
+    assert manifest["tasks"] == 1278
+    assert manifest["source_checkpoints"] == records

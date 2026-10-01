@@ -25,7 +25,6 @@ def q(value):
 def environment(args):
     return dict(PROJECT_ID=args.project, REGION=args.region, BUCKET=args.bucket,
                 SA_EMAIL=args.service_account, REPO_REF=args.repo_ref, RUN_ID=args.run_id,
-                UCV_EXP1_RUN_ID=args.ucv_run_id, UCV_EVAL_RUN_ID=args.ucv_eval_run_id,
                 EVAL_MAX_HOURS=str(args.eval_max_hours), PARALLELISM="3")
 
 
@@ -94,12 +93,7 @@ python -m pytest -q tests/test_exp2_sd_cfr_24h.py tests/test_single_solver.py te
 python -m experiments.fhp.exp1_sd_cfr_efficiency.run --seeds 0 1 2 --repeats 1 --output-dir "$OUT/equivalence"
 python -m {MODULE}.stress --output "$OUT/capacity_stress.json"
 python -m {MODULE}.train --seed 0 --smoke --output-root "$OUT/training"
-gcloud storage rsync --recursive --exclude='(^|/)training_states(/|$)' \
-  {q(args.bucket + '/' + args.ucv_run_id + '/workers')} "$INPUT/ucv/workers"
-gcloud storage rsync --recursive --exclude='(^|/)(tasks|task_results)(/|$)' \
-  {q(args.bucket + '/' + args.ucv_eval_run_id + '/analysis')} "$INPUT/reference"
-python -m {MODULE}.evaluate smoke --source "$OUT/training" --output "$OUT/evaluation" --workers 2 \
-  --ucv-source "$INPUT/ucv" --reference-analysis "$INPUT/reference"
+python -m {MODULE}.evaluate smoke --source "$OUT/training" --output "$OUT/evaluation" --workers 2
 gcloud storage rsync --recursive "$OUT" {q(remote + '/smoke')}
 """
     text += f"gcloud storage rsync --recursive {q(remote + '/workers')} \"$INPUT/sd/workers\"\n"
@@ -109,10 +103,6 @@ python -m {MODULE}.report --source "$INPUT/sd" --output "$OUT/analysis"
 gcloud storage rsync --recursive "$OUT/analysis" {q(remote + '/analysis')}
 """
     text += f"""
-gcloud storage rsync --recursive --exclude='(^|/)training_states(/|$)' \
-  {q(args.bucket + '/' + args.ucv_run_id + '/workers')} "$INPUT/ucv/workers"
-gcloud storage rsync --recursive --exclude='(^|/)(tasks|task_results)(/|$)' \
-  {q(args.bucket + '/' + args.ucv_eval_run_id + '/analysis')} "$INPUT/reference"
 mkdir -p "$OUT/evaluation"
 """
     if stage == "evaluate":
@@ -133,7 +123,7 @@ finish() {{
 trap finish EXIT
 trap 'exit 143' TERM
 python -m {MODULE}.evaluate {'profile' if stage == 'profile' else 'run'} \
-  --source "$INPUT/sd" --ucv-source "$INPUT/ucv" --reference-analysis "$INPUT/reference" \
+  --source "$INPUT/sd" \
   --output "$OUT/evaluation" --workers 8 --max-hours {args.eval_max_hours}
 """
     return text
@@ -190,9 +180,7 @@ def main():
     parser.add_argument("action", choices=("run", "orchestrate", "status", "dry-run", "evaluate-only"))
     for name, env, default in (("project", "PROJECT_ID", None), ("region", "REGION", None),
                               ("bucket", "BUCKET", None), ("service-account", "SA_EMAIL", None),
-                              ("repo-ref", "REPO_REF", None), ("run-id", "RUN_ID", None),
-                              ("ucv-run-id", "UCV_EXP1_RUN_ID", "exp1-fhp-20260923-233627"),
-                              ("ucv-eval-run-id", "UCV_EVAL_RUN_ID", "fhp-eval123-20260925-103616")):
+                              ("repo-ref", "REPO_REF", None), ("run-id", "RUN_ID", None)):
         parser.add_argument("--" + name, default=os.environ.get(env, default))
     parser.add_argument("--eval-max-hours", type=float, default=float(os.environ.get("EVAL_MAX_HOURS", "36")))
     parser.add_argument("--start-stage", choices=("smoke", "profile"), default="smoke")
@@ -219,9 +207,6 @@ def main():
         return
     if args.action in ("run", "evaluate-only"):
         cloud(args, "iam", "service-accounts", "describe", args.service_account)
-        for prefix in (args.ucv_run_id + "/workers/**/checkpoint_manifest.json",
-                       args.ucv_eval_run_id + "/analysis/evaluation_manifest.json"):
-            cloud(args, "storage", "ls", args.bucket + "/" + prefix)
         tag = "-" + time.strftime("%H%M%S", time.gmtime()) if args.action == "evaluate-only" else ""
         name = submit(args, "controller", retry_tag=tag)
         print(f"Submitted {name}; the laptop may disconnect. Outputs: {args.bucket}/{args.run_id}")

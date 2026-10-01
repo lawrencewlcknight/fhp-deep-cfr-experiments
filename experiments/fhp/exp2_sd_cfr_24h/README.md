@@ -50,25 +50,24 @@ could mix checkpoints. Failed partial runs remain available for diagnosis;
 restart training only with a new run ID. Evaluation tasks, by contrast, are
 individually checkpointed and can resume without retraining.
 
-## Comparison and evaluation
+## Standalone evaluation
 
-The default sources are UCV training `exp1-fhp-20260923-233627` and completed
-evaluation `fhp-eval123-20260925-103616`. Both must be available under BUCKET.
-Cloud smoke downloads only playable UCV checkpoints/metadata, excluding
-`training_states`, checks their hashes against the completed evaluation, and
-tests real comparator loading before any production training is submitted.
+This experiment trains and evaluates SD-CFR only. **No UCV run IDs,
+checkpoints, completed evaluation results or access to the Escher bucket are
+required.** BUCKET is the SD-CFR output bucket. Old UCV_EXP1_RUN_ID and
+UCV_EVAL_RUN_ID terminal exports are ignored. Cloud smoke evaluates only the
+short SD-CFR training run it creates itself.
 
-The completed UCV analysis supplies imported comparator rows; it is not
-retrained or re-evaluated against the benchmark agents. All new evaluation
-uses the same five corrected rule agents, game, both-seat duplicate protocol,
-base seed 20260922, and split chance/action-seed layout used in that analysis.
+Cross-algorithm comparisons will be performed separately later; no comparator
+tables are imported and no SD-CFR-versus-UCV games are scheduled here. To support
+that later analysis, the five corrected rule agents, game, both-seat duplicate
+protocol, base seed 20260922, and split chance/action-seed layout remain unchanged.
 
 - Each of 12 SD-CFR checkpoints: **10,000 duplicate-deal pairs per rule agent**.
 - Each checkpoint: **1,000 LBR duplicate pairs**, 100 shards of 10 pairs,
   **4,096** preflop rollout samples. LBR is NOT exact exploitability.
 - Every earlier/later checkpoint pair within each seed: **50,000 duplicate
   pairs** (18 temporal matchups).
-- At 24 hours: all **nine** SD-CFR x UCV cross-seed pairings, **50,000 pairs** each.
 
 For sampled play, a historical network is drawn separately for each player
 once per hand, with a distinct RNG stream; it remains fixed throughout the
@@ -77,8 +76,8 @@ the exact own-reach-weighted behavioural mixture, vectorised over bounded
 model batches. There is no full-game-tree reconstruction or silent sampled
 approximation to this queried mixture.
 
-After training, a real-archive cost profile measures rule, LBR, temporal and
-direct play using the final archive of each seed. An extrapolation using the
+After training, a real-archive cost profile measures rule, LBR and temporal
+play using the final archive of each seed. An extrapolation using the
 worst measured per-pair cost and a 2x margin must fit **EVAL_MAX_HOURS=36** on
 eight evaluation workers before full evaluation is launched. This is a guard,
 not a guaranteed runtime. Profile has its own four-hour ceiling. If it fails,
@@ -87,11 +86,10 @@ a larger evaluation budget (up to 96 hours). No policy truncation is used to
 force the evaluation to fit.
 
 Uncertainty for quality curves is across three independent training seeds.
-Matching seed labels does not make different algorithms paired experiments.
-Direct-play intervals use a two-way training-seed cluster bootstrap, not nine
-independent-matchup inference. Node charts connect observed checkpoint means;
-node counts are algorithm-specific interaction measures. No exact exploitability
-curve or convergence certificate is claimed.
+Temporal matchups pair later and earlier policies within the same training seed.
+Node charts connect observed checkpoint means; no exact exploitability curve or
+convergence certificate is claimed. Playable checkpoints, evaluator provenance
+and per-seed results are retained for the later cross-algorithm analysis.
 
 ## Launch after committing and pushing
 
@@ -101,8 +99,6 @@ From this repository, with PROJECT_ID, REGION, BUCKET and SA_EMAIL configured:
 git pull --ff-only
 export REPO_REF="$(git rev-parse HEAD)"
 export RUN_ID="sdcfr2-24h-$(date -u '+%Y%m%d-%H%M%S')"
-export UCV_EXP1_RUN_ID="exp1-fhp-20260923-233627"
-export UCV_EVAL_RUN_ID="fhp-eval123-20260925-103616"
 bash gcp/run_exp2_sd_cfr_24h.sh run
 ```
 
@@ -114,7 +110,7 @@ The laptop may disconnect after the remote controller is submitted.
 
 Pipeline: cloud functional/equivalence/mature-storage smoke -> three training
 VMs -> training aggregation -> evaluation cost profile -> full evaluation and
-comparative charts. No cloud resources are launched by local tests.
+standalone charts. No cloud resources are launched by local tests.
 
 ```bash
 bash gcp/run_exp2_sd_cfr_24h.sh status
@@ -148,9 +144,9 @@ Under `gs://BUCKET/RUN_ID/`:
 - Per-worker run/checkpoint manifests, `training_trajectory.csv`,
   `advantage_losses.csv`, `solver_diagnostics.csv`, completion/failure records.
 - `analysis/`: training summary, checkpoint index, throughput table/chart.
-- `evaluation/`: reference provenance, cost profile, resumable task results,
-  per-seed and aggregate rule/LBR/temporal tables, nine-cell direct-play table
-  and clustered summary, quality-versus-time/node charts and head-to-head charts.
+- `evaluation/`: evaluator provenance, cost profile, resumable task results,
+  per-seed and aggregate rule/LBR/temporal tables, quality-versus-time/node charts
+  and temporal head-to-head charts. No cross-algorithm comparison outputs.
 - `smoke/`: correctness, short evaluation and capacity reports. Synthetic
   full-capacity replay/archive stress data are deleted, not uploaded.
 

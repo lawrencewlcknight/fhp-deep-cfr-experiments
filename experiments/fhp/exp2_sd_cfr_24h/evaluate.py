@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 from collections import OrderedDict
 from concurrent.futures import ProcessPoolExecutor, as_completed
-import csv
 import hashlib
 import itertools
 import json
@@ -20,26 +19,23 @@ from deep_cfr_poker.sd_cfr_disk import (DiskArchiveReader, DiskSampledPolicy,
                                        DiskBehaviouralPolicy, sha256, write_json)
 from fhp_evaluation.duplicate import evaluate_duplicate_match
 from fhp_evaluation.lbr import LBRConfig, LocalBestResponsePolicy
-from fhp_evaluation.loaders import LoadedCheckpointPolicy
 from fhp_evaluation.rule_agents import PUBLISHED_AGENT_NAMES, published_rule_agents
 from .config import (ALGORITHM_ID, EXPERIMENT_NAME, SEEDS, HOURS, BASE_SEED, RULE_DEALS,
                      LBR_DEALS, LBR_ROLLOUTS, LBR_SHARD_DEALS, CROSSPLAY_DEALS)
 from .train import write_csv
 
 
-def checkpoint_index(root, *, ucv=False, smoke=False):
+def checkpoint_index(root, *, smoke=False):
     records = []
     game = load_fhp_game()
     for manifest_path in sorted(Path(root).glob("workers/*/run_manifest.json")):
         manifest = json.loads(manifest_path.read_text())
-        expected = "exp1_fhp_grouped_wide_ucv_baseline" if ucv else EXPERIMENT_NAME
-        algorithm = "grouped_wide_ucv_escher" if ucv else ALGORITHM_ID
-        if manifest.get("experiment_name") != expected or manifest.get("algorithm_id") != algorithm:
-            raise ValueError(f"Wrong comparator/experiment: {manifest_path}")
-        if bool(manifest.get("smoke", False)) != (smoke and not ucv):
+        if manifest.get("experiment_name") != EXPERIMENT_NAME or manifest.get("algorithm_id") != ALGORITHM_ID:
+            raise ValueError(f"Wrong SD-CFR experiment: {manifest_path}")
+        if bool(manifest.get("smoke", False)) != smoke:
             raise ValueError("Smoke/production source mismatch")
         worker = manifest_path.parent
-        if not ucv and (not (worker / "SUCCESS.json").is_file() or (worker / "FAILURE.json").exists()):
+        if not (worker / "SUCCESS.json").is_file() or (worker / "FAILURE.json").exists():
             raise ValueError("Incomplete training worker")
         rows = json.loads((worker / "checkpoint_manifest.json").read_text())
         if sorted(float(row["checkpoint_target_hours"]) for row in rows) != list(HOURS):
@@ -48,50 +44,19 @@ def checkpoint_index(root, *, ucv=False, smoke=False):
             path = (worker / row["path"]).resolve()
             if not path.is_relative_to(worker.resolve()) or sha256(path) != row["sha256"]:
                 raise ValueError("Checkpoint path/integrity mismatch")
-            if not ucv:
-                DiskArchiveReader(path, game)
-            records.append(dict(experiment="ucv_exp1" if ucv else "sd_cfr_exp2",
+            DiskArchiveReader(path, game)
+            records.append(dict(experiment="sd_cfr_exp2",
                                 seed=int(manifest["seed"]), training_hours=int(row["checkpoint_target_hours"]),
                                 active_seconds=float(row["actual_training_elapsed_seconds"]),
                                 nodes_touched=int(row["nodes_touched"]), path=str(path),
                                 sha256=row["sha256"], outer_iteration=int(row["outer_iteration"])))
-    expected_seeds = (0,) if smoke and not ucv else SEEDS
+    expected_seeds = (0,) if smoke else SEEDS
     if sorted((r["seed"], r["training_hours"]) for r in records) != list(itertools.product(expected_seeds, HOURS)):
         raise ValueError(f"Expected exactly seeds {expected_seeds} at all four checkpoints")
     return records
 
 
-def validate_reference(root, ucv_records):
-    path = Path(root) / "evaluation_manifest.json"
-    manifest = json.loads(path.read_text())
-    if manifest.get("status") != "complete" or manifest.get("smoke"):
-        raise ValueError("Reference evaluation must be completed production")
-    if manifest.get("implementation", {}).get("evaluation_suite_source_tree_sha256") != (
-        "c61209654661d1ad8dd4e716f68aa56a170655b7d1fe3f85545db1850e2e1a79"
-    ):
-        raise ValueError("Reference does not use the pinned validated evaluator")
-    expected = dict(base_seed=BASE_SEED, rule_deal_pairs_per_agent_per_checkpoint=RULE_DEALS,
-                    lbr_deal_pairs_per_checkpoint=LBR_DEALS, lbr_preflop_rollout_samples=LBR_ROLLOUTS,
-                    crossplay_deal_pairs_per_match=CROSSPLAY_DEALS, lbr_shard_deal_pairs=LBR_SHARD_DEALS)
-    for key, value in expected.items():
-        if manifest["evaluation"].get(key) != value:
-            raise ValueError(f"Reference evaluation protocol mismatch: {key}")
-    identities = {(r["seed"], r["training_hours"]): r["checkpoint_sha256"]
-                  for r in manifest["checkpoints"] if r["experiment"] == "exp1"}
-    if identities != {(r["seed"], r["training_hours"]): r["sha256"] for r in ucv_records}:
-        raise ValueError("Reference analysis and supplied UCV policies differ")
-    for name, has_opponent in (("rule_agent_by_seed.csv", True), ("lbr_by_seed.csv", False)):
-        with (Path(root) / name).open() as stream:
-            rows = [row for row in csv.DictReader(stream) if row["experiment"] == "exp1"]
-        observed = [(int(row["training_seed"]), int(row["training_hours"])) +
-                    ((row["opponent"],) if has_opponent else ()) for row in rows]
-        expected_rows = list(itertools.product(SEEDS, HOURS, PUBLISHED_AGENT_NAMES)) if has_opponent else list(itertools.product(SEEDS, HOURS))
-        if sorted(observed) != sorted(expected_rows) or not all(np.isfinite(float(row["mean_mbb_per_hand"])) for row in rows):
-            raise ValueError(f"Incomplete/duplicate/non-finite comparator table: {name}")
-    return sha256(path)
-
-
-def make_tasks(records, ucv_records, *, smoke=False):
+def make_tasks(records, *, smoke=False):
     tasks = []
     by_key = {(r["seed"], r["training_hours"]): r for r in records}
     seeds = (0,) if smoke else SEEDS
@@ -119,13 +84,6 @@ def make_tasks(records, ucv_records, *, smoke=False):
                               path_a=a["path"], sha_a=a["sha256"], path_b=b["path"], sha_b=b["sha256"],
                               num_deals=2 if smoke else CROSSPLAY_DEALS,
                               evaluation_seed=BASE_SEED + 2000000 + earlier * 1000 + later))
-    for a in [r for r in records if r["training_hours"] == 24]:
-        for b in [r for r in ucv_records if r["training_hours"] == 24]:
-            tasks.append(dict(task_id=f"direct_s{a['seed']}_u{b['seed']}", kind="direct",
-                              training_seed=a["seed"], comparator_seed=b["seed"], training_hours=24,
-                              path_a=a["path"], sha_a=a["sha256"], path_b=b["path"], sha_b=b["sha256"],
-                              num_deals=2 if smoke else CROSSPLAY_DEALS,
-                              evaluation_seed=BASE_SEED + 3000000 + 24))
     root = Path(__file__).resolve().parents[3]
     sources = [Path(__file__), root / "deep_cfr_poker/sd_cfr_disk.py",
                root / "deep_cfr_poker/networks.py", root / "deep_cfr_poker/game.py",
@@ -175,14 +133,9 @@ def execute_task(task):
         # Query the exact behavioural mixture, but play the equivalent cheap
         # trajectory policy. The responder never sees the sampled model index.
         a, b, name_a, name_b = responder, target, "local_best_response", "sd_cfr"
-    elif kind in ("temporal", "direct"):
-        if kind == "temporal":
-            opponent, _ = sd_policy(task["path_b"], task["sha_b"])
-        else:
-            if sha256(task["path_b"]) != task["sha_b"]:
-                raise ValueError("UCV comparator changed")
-            opponent = LoadedCheckpointPolicy(game, task["path_b"])
-        a, b, name_a, name_b = target, opponent, "sd_cfr", "earlier_sd_cfr" if kind == "temporal" else "ucv_exp1"
+    elif kind == "temporal":
+        opponent, _ = sd_policy(task["path_b"], task["sha_b"])
+        a, b, name_a, name_b = target, opponent, "sd_cfr", "earlier_sd_cfr"
     else:
         raise ValueError(kind)
     result = evaluate_duplicate_match(game, a, b, num_deals=task["num_deals"],
@@ -234,7 +187,7 @@ def run_tasks(tasks, output, *, workers):
 def profile(tasks, output, *, workers, max_hours):
     # Worst observed full-archive checkpoint across every training seed.
     probes = []
-    for kind in ("rule", "lbr", "temporal", "direct"):
+    for kind in ("rule", "lbr", "temporal"):
         candidates = [t for t in tasks if t["kind"] == kind and t["training_hours"] == 24]
         for seed in sorted({t["training_seed"] for t in candidates}):
             selected = [t for t in candidates if t["training_seed"] == seed]
@@ -262,8 +215,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("profile", "run", "smoke"))
     parser.add_argument("--source", type=Path, required=True)
-    parser.add_argument("--ucv-source", type=Path)
-    parser.add_argument("--reference-analysis", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--max-hours", type=float, default=36)
@@ -271,14 +222,10 @@ def main():
     if not 1 <= args.workers <= 8 or not 0 < args.max_hours <= 96:
         parser.error("Use 1..8 workers and an evaluation budget in (0, 96] hours")
     smoke = args.mode == "smoke"
-    if not smoke and (not args.ucv_source or not args.reference_analysis):
-        parser.error("Production requires UCV checkpoints and its completed reference analysis")
     sd = checkpoint_index(args.source, smoke=smoke)
-    ucv = checkpoint_index(args.ucv_source, ucv=True) if args.ucv_source else []
-    reference_hash = validate_reference(args.reference_analysis, ucv) if ucv else None
-    tasks = make_tasks(sd, ucv, smoke=smoke)
+    tasks = make_tasks(sd, smoke=smoke)
     args.output.mkdir(parents=True, exist_ok=True)
-    write_csv(args.output / "checkpoint_index.csv", sd + ucv)
+    write_csv(args.output / "checkpoint_index.csv", sd)
     if args.mode == "profile":
         profile(tasks, args.output, workers=args.workers, max_hours=args.max_hours)
         return
@@ -291,16 +238,16 @@ def main():
     manifest = dict(status="running", smoke=smoke, exact_exploitability=False,
                     seeds=sorted({r["seed"] for r in sd}), hours=list(HOURS),
                     evaluated_hours=sorted({task["training_hours"] for task in tasks}),
-                    reference_manifest_sha256=reference_hash,
+                    evaluation_scope="standalone_sd_cfr",
                     task_fingerprint=task_fingerprint(tasks), tasks=len(tasks),
-                    source_checkpoints=sd + ucv, lbr_policy="exact_own_reach_historical_mixture",
+                    source_checkpoints=sd, lbr_policy="exact_own_reach_historical_mixture",
                     play_policy="one_uniform_historical_network_per_player_per_hand",
-                    uncertainty_unit="independent_training_seed; crossplay uses two-way seed bootstrap",
+                    uncertainty_unit="independent_training_seed; temporal matchups paired within seed",
                     evaluator_files={p.name: sha256(p) for p in (Path(__file__).parents[3] / "fhp_evaluation").glob("*.py")})
     write_json(args.output / "evaluation_manifest.json", manifest)
     results = run_tasks(tasks, args.output / "tasks", workers=args.workers)
     from .report import evaluation_report
-    evaluation_report(results, sd, ucv, args.output, reference_root=args.reference_analysis, smoke=smoke)
+    evaluation_report(results, sd, args.output, smoke=smoke)
     manifest["status"] = "complete"
     write_json(args.output / "evaluation_manifest.json", manifest)
 
