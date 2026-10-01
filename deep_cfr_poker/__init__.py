@@ -10,10 +10,16 @@ from .constants import (
 from .experiment_utils import cleanup_training_memory
 from .game import FHP_GAME_PARAMETERS, load_fhp_game
 from .solver import DeepCFRSolver, SolveResult
+from .sd_cfr import SDCFRArchive, SampledSDCFRPolicy
+from .single_solver import SELECTED_SD_CFR_KWARGS, SingleDeepCFRSolver
 
 __all__ = [
     "DeepCFRSolver",
     "SolveResult",
+    "SingleDeepCFRSolver",
+    "SELECTED_SD_CFR_KWARGS",
+    "SDCFRArchive",
+    "SampledSDCFRPolicy",
     "DEFAULT_AVERAGE_POLICY_VALUE_TARGET",
     "DEFAULT_GAME_NAME",
     "KNOWN_GAME_VALUES_PLAYER_0",

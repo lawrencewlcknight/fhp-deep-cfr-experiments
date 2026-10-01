@@ -20,6 +20,12 @@ import torch
 
 from .game import load_game
 from .parallel_utils import partition_total, worker_seed
+from .replay import (
+    AdvantageMemory,
+    StrategyMemory,
+    append_batch_to_buffer,
+    records_to_batch,
+)
 from .seeding import set_seed
 from .solver import DeepCFRSolver
 
@@ -51,6 +57,8 @@ class DeepCFRTraversalWorker:
         set_seed(int(worker_seed_value))
         game = load_game(str(game_name))
         self._solver = DeepCFRSolver(game, **dict(solver_kwargs))
+        for network in self._solver._advantage_networks:  # pylint: disable=protected-access
+            network.eval()
 
     def ping(self) -> bool:
         return True
@@ -61,6 +69,7 @@ class DeepCFRTraversalWorker:
             advantage_state_dicts,
         ):
             network.load_state_dict(state_dict)
+            network.eval()
 
     def collect(
         self,
@@ -76,17 +85,30 @@ class DeepCFRTraversalWorker:
         self._solver._iteration = int(iteration)  # pylint: disable=protected-access
 
         before = self._solver._nodes_touched  # pylint: disable=protected-access
-        for _ in range(int(n)):
-            self._solver._traverse_game_tree(  # pylint: disable=protected-access
-                self._solver._root_node,  # pylint: disable=protected-access
-                int(player),
-            )
+        with torch.inference_mode():
+            for _ in range(int(n)):
+                self._solver._traverse_game_tree(  # pylint: disable=protected-access
+                    self._solver._root_node,  # pylint: disable=protected-access
+                    int(player),
+                )
 
-        advantage_memories = [
-            list(buffer)
+        info_state_size = int(self._solver._embedding_size)  # pylint: disable=protected-access
+        num_actions = int(self._solver._num_actions)  # pylint: disable=protected-access
+        advantage_batches = [
+            records_to_batch(
+                buffer,
+                info_state_size=info_state_size,
+                target_size=num_actions,
+                target_attr="advantage",
+            )
             for buffer in self._solver.advantage_buffers
         ]
-        strategy_memories = list(self._solver.strategy_buffer)
+        strategy_batch = records_to_batch(
+            self._solver.strategy_buffer,
+            info_state_size=info_state_size,
+            target_size=num_actions,
+            target_attr="strategy_action_probs",
+        )
         self._solver.clear_advantage_buffers()
         self._solver.strategy_buffer.clear()
 
@@ -94,8 +116,8 @@ class DeepCFRTraversalWorker:
             "nodes_touched": int(
                 self._solver._nodes_touched - before  # pylint: disable=protected-access
             ),
-            "advantage_memories": advantage_memories,
-            "strategy_memories": strategy_memories,
+            "advantage_batches": advantage_batches,
+            "strategy_batch": strategy_batch,
         }
 
 
@@ -232,11 +254,17 @@ class ParallelDeepCFRSolver(DeepCFRSolver):
 
         self._nodes_touched += sum(int(row["nodes_touched"]) for row in results)
         for row in results:
-            for player_index, memories in enumerate(row["advantage_memories"]):
-                for memory in memories:
-                    self._advantage_memories[player_index].add(memory)
-            for memory in row["strategy_memories"]:
-                self._strategy_memories.add(memory)
+            for player_index, batch in enumerate(row["advantage_batches"]):
+                append_batch_to_buffer(
+                    self._advantage_memories[player_index],
+                    batch,
+                    record_type=AdvantageMemory,
+                )
+            append_batch_to_buffer(
+                self._strategy_memories,
+                row["strategy_batch"],
+                record_type=StrategyMemory,
+            )
         del results, refs, weights_ref
 
     def __del__(self):

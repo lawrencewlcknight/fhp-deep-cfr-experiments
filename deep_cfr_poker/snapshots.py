@@ -150,6 +150,8 @@ def save_policy_snapshot(
     solver_config: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """Writes a :data:`POLICY_SNAPSHOT_TYPE` snapshot to ``path``."""
+    if getattr(solver, "_policy_training_mode", None) == "disabled":
+        raise ValueError("SD-CFR must export an advantage archive, not a policy-network snapshot")
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {

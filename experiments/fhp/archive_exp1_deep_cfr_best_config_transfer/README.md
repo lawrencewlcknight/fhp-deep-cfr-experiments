@@ -1,4 +1,8 @@
-# Experiment 1 — Best-configuration transfer to FHP
+# Archived former Experiment 1 — Best-configuration transfer to FHP
+
+This conventional Deep CFR experiment is superseded and retained only for
+historical reference. The active Experiment 1 is the
+[SD-CFR efficiency audit](../exp1_sd_cfr_efficiency/README.md).
 
 This experiment trains Deep CFR on the repository's canonical FHP game using
 the approved best previously validated configuration. It is a single fixed
@@ -17,6 +21,7 @@ ablation or hyperparameter search.
 | Learning rate | `0.004`, constant |
 | Advantage / strategy batch | `2048 / 1024` |
 | Replay capacity | `5,000,000` |
+| Replay storage | Compact typed NumPy arrays |
 | Advantage / policy steps | `200 / 200` |
 | Policy fitting cadence | Every `10` iterations |
 | Target processing | Standardise, epsilon `1e-6` |
@@ -32,7 +37,7 @@ large; this is intentional so that the approved run is resumable.
 ## Local smoke test
 
 ```bash
-python -m experiments.fhp.exp1_deep_cfr_best_config_transfer.run \
+python -m experiments.fhp.archive_exp1_deep_cfr_best_config_transfer.run \
   --seeds 1234 \
   --iterations 2 \
   --traversals 2 \
@@ -52,24 +57,24 @@ python -m experiments.fhp.exp1_deep_cfr_best_config_transfer.run \
 ## Full run
 
 ```bash
-python -m experiments.fhp.exp1_deep_cfr_best_config_transfer.run
+python -m experiments.fhp.archive_exp1_deep_cfr_best_config_transfer.run
 ```
 
 ## Google Cloud Batch
 
 For first-time project, bucket, IAM, logging, monitoring, and retrieval setup,
-follow [`docs/GCP_BATCH_EXPERIMENTS.md`](../../../docs/GCP_BATCH_EXPERIMENTS.md).
+follow the [archived cloud guide](../../../docs/archive_GCP_DEEP_CFR_EXPERIMENT1.md).
 
 After publishing this local repository to the launcher's default repository URL
 (or setting `REPO_URL` to its published location), set `PROJECT_ID`, `REGION`,
 `BUCKET`, and `SA_EMAIL`:
 
 ```bash
-JOB_NAME="fhp-deep-cfr-exp1-$(date +%Y%m%d-%H%M%S)"
+JOB_NAME="archive-fhp-deep-cfr-exp1-$(date +%Y%m%d-%H%M%S)"
 
 ./gcp/submit_batch_experiment.sh \
   "$JOB_NAME" \
-  "python -m experiments.fhp.exp1_deep_cfr_best_config_transfer.run \
+  "python -m experiments.fhp.archive_exp1_deep_cfr_best_config_transfer.run \
     --output-root outputs/cloud/$JOB_NAME" \
   "n2-highmem-8" \
   "345600" \

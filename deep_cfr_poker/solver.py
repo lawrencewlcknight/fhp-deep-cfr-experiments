@@ -13,6 +13,7 @@ policy can be passed directly to OpenSpiel evaluation utilities such as
 from __future__ import annotations
 
 import collections
+import contextlib
 import logging
 import math
 import os
@@ -34,10 +35,12 @@ from open_spiel.python.algorithms import exploitability
 from .networks import build_network, build_shared_trunk_player_heads
 from .replay import (
     AdvantageMemory,
+    ReplayBatch,
     ReservoirBuffer,
     StrategyMemory,
     make_advantage_buffer,
     make_strategy_buffer,
+    records_to_batch,
 )
 
 
@@ -56,7 +59,7 @@ class SolveResult:
     and lets the diagnostic surface grow without breaking call sites.
     """
 
-    policy_network: nn.Module
+    policy_network: Optional[nn.Module]
     advantage_losses: Dict[int, List[float]]
     policy_losses: List[Optional[float]]
     nash_conv: List[float]
@@ -105,9 +108,12 @@ class DeepCFRSolver(policy.Policy):
         evaluation_interval: Evaluate exploitability and diagnostics every this
             many iterations. Defaults to ``policy_network_train_every`` for
             backwards-compatible checkpoint behaviour.
-        policy_training_mode: Either ``"intermittent"`` or ``"final_only"``.
+        policy_training_mode: ``"intermittent"``, ``"final_only"``, or ``"disabled"``.
             Final-only mode trains the average-policy network once after CFR
-            data collection finishes.
+            data collection finishes. Disabled mode performs no policy fitting
+            and is used for standalone SD-CFR.
+        collect_strategy_replay: Whether to retain average-policy observations.
+            Standalone SD-CFR disables this; advantage replay is unaffected.
         final_policy_network_train_steps: Number of policy-gradient steps for
             the final extraction in final-only mode. Defaults to
             ``policy_network_train_steps``.
@@ -134,8 +140,8 @@ class DeepCFRSolver(policy.Policy):
             regret-target magnitude when minibatching.
         replay_buffer_type: Replay storage backend. ``"python"`` keeps the
             original list-of-records reservoir; ``"compact"`` stores fixed-shape
-            replay tensors in contiguous NumPy arrays and materialises records
-            only for sampled minibatches.
+            replay tensors in contiguous NumPy arrays and supplies sampled
+            minibatches directly to PyTorch without materialising records.
         average_strategy_weighting: Average-policy supervised loss weighting.
             ``"linear"`` applies the baseline CFR-style iteration weighting;
             ``"uniform"`` gives all sampled policy-memory rows equal weight.
@@ -177,6 +183,7 @@ class DeepCFRSolver(policy.Policy):
         average_strategy_weighting: str = "linear",
         priority_alpha: float = 1.0,
         priority_epsilon: float = 1e-6,
+        collect_strategy_replay: bool = True,
     ) -> None:
         all_players = list(range(game.num_players()))
         super().__init__(game, all_players)
@@ -189,10 +196,12 @@ class DeepCFRSolver(policy.Policy):
             evaluation_interval = policy_network_train_every
         if int(evaluation_interval) < 1:
             raise ValueError("evaluation_interval must be >= 1")
-        if policy_training_mode not in {"intermittent", "final_only"}:
+        if policy_training_mode not in {"intermittent", "final_only", "disabled"}:
             raise ValueError(
-                "policy_training_mode must be either 'intermittent' or 'final_only'"
+                "policy_training_mode must be 'intermittent', 'final_only', or 'disabled'"
             )
+        if not collect_strategy_replay and policy_training_mode != "disabled":
+            raise ValueError("Policy fitting requires collect_strategy_replay=True")
         if final_policy_network_train_steps is None:
             final_policy_network_train_steps = policy_network_train_steps
         if int(final_policy_network_train_steps) < 1:
@@ -203,6 +212,9 @@ class DeepCFRSolver(policy.Policy):
         self._batch_size_strategy = batch_size_strategy
         self._policy_network_type = str(policy_network_type).lower()
         self._advantage_network_type = str(advantage_network_type).lower()
+        self._policy_network_layers = tuple(int(x) for x in policy_network_layers)
+        self._advantage_network_layers = tuple(int(x) for x in advantage_network_layers)
+        self._collect_strategy_replay = bool(collect_strategy_replay)
         self._uses_shared_advantage_trunk = (
             self._advantage_network_type == "shared_trunk_player_heads"
         )
@@ -295,7 +307,7 @@ class DeepCFRSolver(policy.Policy):
 
         # Average-policy network.
         self._strategy_memories = make_strategy_buffer(
-            memory_capacity,
+            memory_capacity if self._collect_strategy_replay else 1,
             self._replay_buffer_type,
             info_state_size=self._embedding_size,
             num_actions=self._num_actions,
@@ -514,6 +526,10 @@ class DeepCFRSolver(policy.Policy):
         post_iteration_callback: Optional[
             Callable[["DeepCFRSolver", int], None]
         ] = None,
+        post_player_update_callback: Optional[
+            Callable[["DeepCFRSolver", int, int], None]
+        ] = None,
+        max_training_seconds: Optional[float] = None,
     ) -> SolveResult:
         """Runs one fixed-budget Deep CFR training phase.
 
@@ -522,7 +538,17 @@ class DeepCFRSolver(policy.Policy):
         solver plus its global completed-iteration count. This permits
         lightweight observation or snapshotting without splitting one training
         trajectory into multiple calls to :meth:`solve`.
+
+        ``post_player_update_callback`` runs immediately after each player's
+        advantage fit, receiving solver, player and one-indexed iteration.
+        SD-CFR uses it to retain the historical strategy at the correct phase.
+        An optional positive finite time budget stops after a complete outer
+        iteration. Archive capture and callbacks are included in that budget.
         """
+        if max_training_seconds is not None and (
+            not math.isfinite(float(max_training_seconds)) or float(max_training_seconds) <= 0
+        ):
+            raise ValueError("max_training_seconds must be positive and finite")
         start_time = time.perf_counter()
         advantage_losses: Dict[int, List[float]] = collections.defaultdict(list)
         policy_losses_at_checkpoints: List[Optional[float]] = []
@@ -557,13 +583,17 @@ class DeepCFRSolver(policy.Policy):
                     self.reinitialize_advantage_network(p)
 
                 advantage_losses[p].append(self._learn_advantage_network(p))
+                if post_player_update_callback is not None:
+                    post_player_update_callback(self, int(p), int(self._iteration))
 
             # End-of-iteration bookkeeping.
             self._iteration += 1
 
             # Train the average-policy network either intermittently or once
             # at the end, depending on the experiment.
-            if self._policy_training_mode == "final_only":
+            if self._policy_training_mode == "disabled":
+                train_now = False
+            elif self._policy_training_mode == "final_only":
                 train_now = it == self._num_iterations - 1
             else:
                 train_now = (((it + 1) % self._policy_network_train_every) == 0) or (
@@ -600,6 +630,11 @@ class DeepCFRSolver(policy.Policy):
             if post_iteration_callback is not None:
                 post_iteration_callback(self, int(self._iteration - 1))
 
+            time_limit_reached = (
+                max_training_seconds is not None
+                and time.perf_counter() - start_time >= float(max_training_seconds)
+            )
+            evaluate_now = evaluate_now or time_limit_reached
             if not evaluate_now:
                 continue
 
@@ -756,6 +791,9 @@ class DeepCFRSolver(policy.Policy):
                 )
             )
 
+            if time_limit_reached:
+                break
+
         self._nodes_touched_history = nodes_touched_history
         self._average_policy_value_history = average_policy_values
 
@@ -773,8 +811,24 @@ class DeepCFRSolver(policy.Policy):
 
     def _collect_traversals_for_player(self, player: int) -> None:
         """Collects this iteration's traversal samples for one player."""
-        for _ in range(self._num_traversals):
-            self._traverse_game_tree(self._root_node, int(player))
+        with self._advantage_inference_mode():
+            for _ in range(self._num_traversals):
+                self._traverse_game_tree(self._root_node, int(player))
+
+    @contextlib.contextmanager
+    def _advantage_inference_mode(self):
+        """Sets advantage networks to eval once for a collection phase."""
+        training_modes = [network.training for network in self._advantage_networks]
+        for network in self._advantage_networks:
+            network.eval()
+        try:
+            with torch.inference_mode():
+                yield
+        finally:
+            for network, was_training in zip(
+                self._advantage_networks, training_modes
+            ):
+                network.train(was_training)
 
     def _traverse_game_tree(self, state, player: int) -> float:
         """External-sampling traversal that populates the replay buffers.
@@ -791,7 +845,12 @@ class DeepCFRSolver(policy.Policy):
             return self._traverse_game_tree(state.child(action), player)
 
         if state.current_player() == player:
-            _, strategy = self._sample_action_from_advantage(state, player)
+            info_state = np.asarray(
+                state.information_state_tensor(player), dtype=np.float32
+            )
+            _, strategy = self._sample_action_from_advantage(
+                state, player, info_state=info_state
+            )
             legal_actions = state.legal_actions()
             expected_payoff: Dict[int, float] = {}
             for action in legal_actions:
@@ -809,7 +868,7 @@ class DeepCFRSolver(policy.Policy):
 
             self._advantage_memories[player].add(
                 AdvantageMemory(
-                    state.information_state_tensor(player),
+                    info_state,
                     int(self._iteration),
                     sampled_regret,
                 )
@@ -819,7 +878,12 @@ class DeepCFRSolver(policy.Policy):
         # Non-traversing player: store their regret-matched policy as an
         # average-policy training target and sample one action to descend.
         other_player = state.current_player()
-        _, strategy = self._sample_action_from_advantage(state, other_player)
+        info_state = np.asarray(
+            state.information_state_tensor(other_player), dtype=np.float32
+        )
+        _, strategy = self._sample_action_from_advantage(
+            state, other_player, info_state=info_state
+        )
         probs = np.asarray(strategy, dtype=np.float64)
         total = probs.sum()
         if total <= 0.0:
@@ -833,17 +897,22 @@ class DeepCFRSolver(policy.Policy):
         else:
             probs = probs / total
         sampled_action = int(np.random.choice(self._num_actions, p=probs))
-        self._strategy_memories.add(
-            StrategyMemory(
-                state.information_state_tensor(other_player),
-                int(self._iteration),
-                strategy,
+        if self._collect_strategy_replay:
+            self._strategy_memories.add(
+                StrategyMemory(
+                    info_state,
+                    int(self._iteration),
+                    strategy,
+                )
             )
-        )
         return self._traverse_game_tree(state.child(sampled_action), player)
 
     def _sample_action_from_advantage(
-        self, state, player: int
+        self,
+        state,
+        player: int,
+        *,
+        info_state: Optional[np.ndarray] = None,
     ) -> Tuple[List[float], np.ndarray]:
         """Returns the advantages and the regret-matched policy for ``player``.
 
@@ -852,20 +921,25 @@ class DeepCFRSolver(policy.Policy):
         back to uniform over legal actions (avoiding deterministic tie-breaking
         that would suppress exploration).
         """
-        info_state = state.information_state_tensor(player)
+        if info_state is None:
+            info_state = np.asarray(
+                state.information_state_tensor(player), dtype=np.float32
+            )
         legal_actions = state.legal_actions(player)
         net = self._advantage_networks[player]
-        was_training = net.training
-        net.eval()
-        with torch.no_grad():
-            try:
-                state_tensor = torch.as_tensor(
-                    np.expand_dims(info_state, axis=0), dtype=torch.float32
-                )
-                raw_advantages = net(state_tensor)[0].cpu().numpy()
-            finally:
-                if was_training:
-                    net.train()
+        state_tensor = torch.from_numpy(
+            np.asarray(info_state, dtype=np.float32).reshape(1, -1)
+        )
+        if torch.is_inference_mode_enabled():
+            raw_advantages = net(state_tensor)[0].cpu().numpy()
+        else:
+            was_training = net.training
+            net.eval()
+            with torch.inference_mode():
+                try:
+                    raw_advantages = net(state_tensor)[0].cpu().numpy()
+                finally:
+                    net.train(was_training)
         advantages = [max(0.0, a) for a in raw_advantages]
         cumulative_regret = float(sum(advantages[a] for a in legal_actions))
         matched_regrets = np.zeros(self._num_actions, dtype=np.float32)
@@ -1013,8 +1087,14 @@ class DeepCFRSolver(policy.Policy):
         if total <= _ADVANTAGE_DIAGNOSTIC_MAX_SAMPLES:
             chunks = []
             for buf in self._advantage_memories:
-                for sample in buf:
-                    chunks.append(np.asarray(sample.advantage, dtype=np.float32).ravel())
+                as_batch = getattr(buf, "as_batch", None)
+                if callable(as_batch):
+                    chunks.append(as_batch()["targets"].reshape(-1))
+                else:
+                    for sample in buf:
+                        chunks.append(
+                            np.asarray(sample.advantage, dtype=np.float32).ravel()
+                        )
         else:
             # Sample without replacement across both buffers proportional to
             # their sizes.
@@ -1026,12 +1106,23 @@ class DeepCFRSolver(policy.Policy):
                     1, int(round(_ADVANTAGE_DIAGNOSTIC_MAX_SAMPLES * size / total_size))
                 )
                 share = min(share, size)
-                if share == size:
-                    samples = list(buf)
+                sample_batch = getattr(buf, "sample_batch", None)
+                if callable(sample_batch):
+                    if share == size:
+                        chunks.append(buf.as_batch()["targets"].reshape(-1))
+                    else:
+                        chunks.append(
+                            sample_batch(share)["targets"].reshape(-1)
+                        )
                 else:
-                    samples = random.sample(list(buf), share)
-                for sample in samples:
-                    chunks.append(np.asarray(sample.advantage, dtype=np.float32).ravel())
+                    if share == size:
+                        samples = list(buf)
+                    else:
+                        samples = random.sample(list(buf), share)
+                    for sample in samples:
+                        chunks.append(
+                            np.asarray(sample.advantage, dtype=np.float32).ravel()
+                        )
 
         values = np.concatenate(chunks) if chunks else np.empty(0, dtype=np.float32)
         if values.size == 0:
@@ -1102,30 +1193,23 @@ class DeepCFRSolver(policy.Policy):
         self._advantage_networks[player].train()
 
         for _ in range(self._advantage_network_train_steps):
-            samples = self._draw_advantage_samples(player, buffer)
-            if not samples:
+            batch = self._draw_advantage_batch(player, buffer)
+            if batch is None:
                 return None
 
-            info_states = np.asarray(
-                [s.info_state for s in samples], dtype=np.float32
-            )
-            advantages = np.asarray(
-                [s.advantage for s in samples], dtype=np.float32
-            )
+            info_states = batch["info_states"]
+            advantages = batch["targets"]
             advantages = self._process_advantage_targets(advantages, player)
-            iterations = np.asarray(
-                [self._as_scalar_iteration(s.iteration) for s in samples],
-                dtype=np.float32,
-            )
+            iterations = batch["iterations"].astype(np.float32, copy=False)
 
             self._optimizer_advantages[player].zero_grad()
-            iters = torch.as_tensor(
-                np.sqrt(iterations).reshape(-1, 1), dtype=torch.float32
+            iters = torch.from_numpy(
+                np.sqrt(iterations).reshape(-1, 1)
             )
             outputs = self._advantage_networks[player](
-                torch.as_tensor(info_states, dtype=torch.float32)
+                torch.from_numpy(info_states)
             )
-            targets = torch.as_tensor(advantages, dtype=torch.float32)
+            targets = torch.from_numpy(advantages)
             loss = self._loss_advantages(iters * outputs, iters * targets)
             loss.backward()
             grad_norms.append(
@@ -1138,6 +1222,76 @@ class DeepCFRSolver(policy.Policy):
             float(np.mean(grad_norms)) if grad_norms else float("nan")
         )
         return last_loss
+
+    def _draw_advantage_batch(
+        self, player: int, buffer: ReservoirBuffer
+    ) -> Optional[ReplayBatch]:
+        """Returns typed learner arrays, using zero-object compact sampling."""
+        if len(buffer) == 0:
+            self._last_advantage_priority_effective_sample_size[player] = float(
+                "nan"
+            )
+            return None
+
+        sample_batch = getattr(buffer, "sample_batch", None)
+        if not callable(sample_batch):
+            samples = self._draw_advantage_samples(player, buffer)
+            if not samples:
+                return None
+            return records_to_batch(
+                samples,
+                info_state_size=self._embedding_size,
+                target_size=self._num_actions,
+                target_attr="advantage",
+            )
+
+        if self._advantage_replay_sampling == "uniform":
+            self._last_advantage_priority_effective_sample_size[player] = float(
+                len(buffer)
+            )
+
+        batch_size = self._batch_size_advantage
+        if not batch_size or batch_size > len(buffer):
+            if batch_size and not self._warned_advantage_buffer_too_small[player]:
+                _LOGGER.warning(
+                    "Advantage buffer for player %d has %d samples but "
+                    "batch_size_advantage=%d. Falling back to training on "
+                    "the full buffer for this iteration. Subsequent "
+                    "occurrences are silenced.",
+                    player,
+                    len(buffer),
+                    batch_size,
+                )
+                self._warned_advantage_buffer_too_small[player] = True
+            if self._advantage_replay_sampling == "priority_abs_adv":
+                self._record_compact_priority_effective_sample_size(player, buffer)
+            return buffer.as_batch()
+
+        if self._advantage_replay_sampling == "priority_abs_adv":
+            probabilities = self._compact_priority_probabilities(buffer)
+            self._last_advantage_priority_effective_sample_size[player] = float(
+                1.0 / np.sum(probabilities * probabilities)
+            )
+            return sample_batch(batch_size, probabilities=probabilities)
+        return sample_batch(batch_size)
+
+    def _compact_priority_probabilities(self, buffer) -> np.ndarray:
+        raw_scores = buffer.target_abs_mean()
+        priorities = np.power(
+            raw_scores + self._priority_epsilon, self._priority_alpha
+        )
+        total = float(np.sum(priorities))
+        if not np.isfinite(total) or total <= 0.0:
+            return np.full(len(buffer), 1.0 / len(buffer), dtype=np.float64)
+        return priorities / total
+
+    def _record_compact_priority_effective_sample_size(
+        self, player: int, buffer
+    ) -> None:
+        probabilities = self._compact_priority_probabilities(buffer)
+        self._last_advantage_priority_effective_sample_size[player] = float(
+            1.0 / np.sum(probabilities * probabilities)
+        )
 
     def _draw_advantage_samples(
         self, player: int, buffer: ReservoirBuffer
@@ -1246,30 +1400,23 @@ class DeepCFRSolver(policy.Policy):
         self._policy_network.train()
 
         for _ in range(self._policy_network_train_steps):
-            samples = self._draw_strategy_samples()
-            if not samples:
+            batch = self._draw_strategy_batch()
+            if batch is None:
                 return None
 
-            info_states = np.asarray(
-                [s.info_state for s in samples], dtype=np.float32
-            )
-            action_probs = np.asarray(
-                [s.strategy_action_probs for s in samples], dtype=np.float32
-            )
-            iterations = np.asarray(
-                [self._as_scalar_iteration(s.iteration) for s in samples],
-                dtype=np.float32,
-            )
+            info_states = batch["info_states"]
+            action_probs = batch["targets"]
+            iterations = batch["iterations"].astype(np.float32, copy=False)
 
             self._optimizer_policy.zero_grad()
             if self._average_strategy_weighting == "linear":
                 sample_weights = np.sqrt(iterations).reshape(-1, 1)
             else:
                 sample_weights = np.ones((len(iterations), 1), dtype=np.float32)
-            iters = torch.as_tensor(sample_weights, dtype=torch.float32)
-            ac_probs = torch.as_tensor(action_probs, dtype=torch.float32)
+            iters = torch.from_numpy(sample_weights)
+            ac_probs = torch.from_numpy(action_probs)
             logits = self._policy_network(
-                torch.as_tensor(info_states, dtype=torch.float32)
+                torch.from_numpy(info_states)
             )
             outputs = self._policy_sm(logits)
             loss = self._loss_policy(iters * outputs, iters * ac_probs)
@@ -1282,6 +1429,38 @@ class DeepCFRSolver(policy.Policy):
             float(np.mean(grad_norms)) if grad_norms else float("nan")
         )
         return last_loss
+
+    def _draw_strategy_batch(self) -> Optional[ReplayBatch]:
+        """Returns typed strategy learner arrays when compact replay is used."""
+        buffer = self._strategy_memories
+        if len(buffer) == 0:
+            return None
+        sample_batch = getattr(buffer, "sample_batch", None)
+        if not callable(sample_batch):
+            samples = self._draw_strategy_samples()
+            if not samples:
+                return None
+            return records_to_batch(
+                samples,
+                info_state_size=self._embedding_size,
+                target_size=self._num_actions,
+                target_attr="strategy_action_probs",
+            )
+
+        batch_size = self._batch_size_strategy
+        if not batch_size or batch_size > len(buffer):
+            if batch_size and not self._warned_strategy_buffer_too_small:
+                _LOGGER.warning(
+                    "Strategy buffer has %d samples but "
+                    "batch_size_strategy=%d. Falling back to training on "
+                    "the full buffer for this iteration. Subsequent "
+                    "occurrences are silenced.",
+                    len(buffer),
+                    batch_size,
+                )
+                self._warned_strategy_buffer_too_small = True
+            return buffer.as_batch()
+        return sample_batch(batch_size)
 
     def _draw_strategy_samples(self) -> List[StrategyMemory]:
         """Returns a batch of strategy samples or [] if the buffer is empty."""

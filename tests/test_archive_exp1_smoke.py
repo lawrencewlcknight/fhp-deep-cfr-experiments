@@ -8,12 +8,12 @@ import pytest
 pytest.importorskip("pyspiel")
 pytest.importorskip("torch")
 
-from experiments.fhp.exp1_deep_cfr_best_config_transfer.config import smoke_config
-from experiments.fhp.exp1_deep_cfr_best_config_transfer.run import run_experiment
+from experiments.fhp.archive_exp1_deep_cfr_best_config_transfer.config import smoke_config
+from experiments.fhp.archive_exp1_deep_cfr_best_config_transfer.run import run_experiment
 
 
 @pytest.mark.smoke
-def test_exp1_smoke_writes_snapshots_checkpoint_and_manifests(tmp_path):
+def test_archived_exp1_smoke_writes_snapshots_checkpoint_and_manifests(tmp_path):
     outcome = run_experiment(
         config=smoke_config(),
         seeds=[1234],

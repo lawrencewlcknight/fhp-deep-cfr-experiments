@@ -2,7 +2,7 @@ from copy import deepcopy
 
 import pytest
 
-from experiments.fhp.exp1_deep_cfr_best_config_transfer.config import (
+from experiments.fhp.archive_exp1_deep_cfr_best_config_transfer.config import (
     CHECKPOINT_SCHEDULE,
     DEFAULT_CONFIG,
     DEFAULT_SEEDS,
@@ -10,11 +10,11 @@ from experiments.fhp.exp1_deep_cfr_best_config_transfer.config import (
 )
 
 
-def test_exp1_approved_configuration_is_pinned():
+def test_archived_exp1_approved_configuration_is_pinned():
     assert DEFAULT_SEEDS == (1234, 2025, 31415, 27182, 16180)
     assert DEFAULT_CONFIG == {
         "experiment_id": 1,
-        "experiment_name": "exp1_fhp_deep_cfr_best_config_transfer",
+        "experiment_name": "archive_exp1_fhp_deep_cfr_best_config_transfer",
         "game_name": "FHP",
         "num_iterations": 1050,
         "num_traversals": 320,
@@ -29,7 +29,7 @@ def test_exp1_approved_configuration_is_pinned():
         "batch_size_advantage": 2048,
         "batch_size_strategy": 1024,
         "memory_capacity": 5_000_000,
-        "replay_buffer_type": "python",
+        "replay_buffer_type": "compact",
         "reinitialize_advantage_networks": False,
         "policy_network_train_steps": 200,
         "advantage_network_train_steps": 200,
@@ -52,7 +52,7 @@ def test_exp1_approved_configuration_is_pinned():
     validate_config(DEFAULT_CONFIG)
 
 
-def test_exp1_rejects_full_tree_evaluation_and_stale_snapshots():
+def test_archived_exp1_rejects_full_tree_evaluation_and_stale_snapshots():
     unsafe = deepcopy(DEFAULT_CONFIG)
     unsafe["compute_exploitability"] = True
     with pytest.raises(ValueError, match="exploitability"):

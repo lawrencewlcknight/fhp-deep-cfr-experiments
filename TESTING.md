@@ -7,5 +7,6 @@ pytest
 ```
 
 The tests pin the canonical FHP parameters and OpenSpiel game shape, exercise
-both the solver and Experiment 1 end to end without full-tree evaluation, and
+the SD-CFR efficiency audit (Experiment 1) and the archived conventional Deep CFR
+runner end to end without full-tree evaluation, and
 reject stale variant names or committed output artefacts.

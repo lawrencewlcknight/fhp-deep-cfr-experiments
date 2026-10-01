@@ -31,7 +31,7 @@ CPU_MILLI="${5:-4000}"
 MEMORY_MIB="${6:-16000}"
 BOOT_DISK_SIZE_GB="${7:-100}"
 BOOT_DISK_TYPE="${8:-pd-balanced}"
-REPO_URL="${REPO_URL:-https://github.com/lawrencewlcknight/fhp-poker-deep-cfr-experiments.git}"
+REPO_URL="${REPO_URL:-https://github.com/lawrencewlcknight/fhp-deep-cfr-experiments.git}"
 REPO_REF="${REPO_REF:-main}"
 
 : "${PROJECT_ID:?Set PROJECT_ID first}"
@@ -119,8 +119,10 @@ WORKDIR=/workspace
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
 
-git clone --depth 1 --branch {repo_ref_q} {repo_url_q} source-repo
+git clone --no-checkout --depth 1 {repo_url_q} source-repo
 cd source-repo
+git fetch --depth 1 origin {repo_ref_q}
+git checkout --detach FETCH_HEAD
 
 echo "Repository source: {repo_url}"
 echo "Requested repository ref: {repo_ref}"
@@ -322,6 +324,7 @@ echo "-----------------------------------"
 echo
 
 gcloud batch jobs submit "${JOB_NAME}" \
+  --project "${PROJECT_ID}" \
   --location "${REGION}" \
   --config "${JOB_JSON}"
 

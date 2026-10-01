@@ -9,8 +9,13 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_no_stale_variant_references():
     forbidden = "le" + "duc"
     offenders = []
+    # These documents intentionally record the requested small-game port's
+    # provenance; runtime game routing must still remain FHP-specific.
+    provenance_documents = {ROOT / "README.md", ROOT / "docs" / "SD_CFR.md"}
     for path in ROOT.rglob("*"):
         if not path.is_file() or ".git" in path.parts:
+            continue
+        if path in provenance_documents:
             continue
         if path.suffix.lower() in {".pyc", ".png", ".jpg", ".pt", ".npz"}:
             continue
@@ -25,7 +30,7 @@ def test_only_approved_experiment_and_no_outputs():
         for path in (ROOT / "experiments" / "fhp").iterdir()
         if path.name not in {"__init__.py", "__pycache__"}
     )
-    assert experiment_children == ["exp1_deep_cfr_best_config_transfer"]
+    assert experiment_children == ["archive_exp1_deep_cfr_best_config_transfer", "exp1_sd_cfr_efficiency"]
 
     output_children = sorted(path.name for path in (ROOT / "outputs").iterdir())
     assert output_children == [".gitkeep"]

@@ -1,4 +1,4 @@
-"""CLI runner for Experiment 1's FHP Deep CFR training run."""
+"""CLI runner for the archived former FHP Deep CFR Experiment 1."""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ from .config import (  # noqa: E402
 )
 
 
-_LOGGER = logging.getLogger("deep_cfr_poker.experiment.exp1")
+_LOGGER = logging.getLogger("deep_cfr_poker.experiment.archive_exp1")
 
 
 def _str2bool(value) -> bool:
@@ -217,7 +217,7 @@ def run_experiment(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run Experiment 1: best validated Deep CFR configuration on FHP."
+        description="Run archived former Experiment 1: conventional Deep CFR on FHP."
     )
     parser.add_argument("--output-root", default="outputs")
     parser.add_argument("--seeds", default=None)

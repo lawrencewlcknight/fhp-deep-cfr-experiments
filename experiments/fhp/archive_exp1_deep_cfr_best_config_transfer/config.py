@@ -1,4 +1,4 @@
-"""Approved configuration for Experiment 1's FHP Deep CFR training run."""
+"""Archived configuration for the former FHP Deep CFR Experiment 1."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from deep_cfr_poker.constants import DEFAULT_EXPLOITABILITY_THRESHOLD
 
 
 EXPERIMENT_ID = 1
-EXPERIMENT_NAME = "exp1_fhp_deep_cfr_best_config_transfer"
+EXPERIMENT_NAME = "archive_exp1_fhp_deep_cfr_best_config_transfer"
 DEFAULT_SEEDS = (1234, 2025, 31415, 27182, 16180)
 CHECKPOINT_SCHEDULE = (100, 250, 500, 750, 1050)
 
@@ -30,7 +30,7 @@ DEFAULT_CONFIG = {
     "batch_size_advantage": 2048,
     "batch_size_strategy": 1024,
     "memory_capacity": 5_000_000,
-    "replay_buffer_type": "python",
+    "replay_buffer_type": "compact",
     "reinitialize_advantage_networks": False,
     "policy_network_train_steps": 200,
     "advantage_network_train_steps": 200,
@@ -55,11 +55,11 @@ DEFAULT_CONFIG = {
 def validate_config(config: Mapping[str, object]) -> None:
     """Validate FHP safety constraints and checkpoint freshness."""
     if str(config["game_name"]) != "FHP":
-        raise ValueError("Experiment 1 must use the canonical FHP game")
+        raise ValueError("Archived Deep CFR experiment must use the canonical FHP game")
     if bool(config["compute_exploitability"]):
         raise ValueError("Exact full-tree exploitability must remain disabled for FHP")
     if str(config["execution_backend"]) != "sequential":
-        raise ValueError("Experiment 1's approved execution backend is sequential")
+        raise ValueError("Archived Deep CFR experiment's execution backend is sequential")
 
     positive_fields = (
         "num_iterations",
@@ -91,7 +91,7 @@ def validate_config(config: Mapping[str, object]) -> None:
 
 
 def smoke_config() -> dict:
-    """Return a tiny configuration preserving Experiment 1's code paths."""
+    """Return a tiny configuration preserving the archived experiment's code paths."""
     config = deepcopy(DEFAULT_CONFIG)
     config.update(
         {

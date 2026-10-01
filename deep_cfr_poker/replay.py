@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import collections
 import random
-from typing import Any, Iterator, List
+from typing import Any, Dict, Iterator, List, Mapping, Type
 
 import numpy as np
 
@@ -32,6 +32,61 @@ AdvantageMemory = collections.namedtuple(
 StrategyMemory = collections.namedtuple(
     "StrategyMemory", ["info_state", "iteration", "strategy_action_probs"]
 )
+
+ReplayBatch = Dict[str, np.ndarray]
+
+
+def records_to_batch(
+    records,
+    *,
+    info_state_size: int,
+    target_size: int,
+    target_attr: str,
+) -> ReplayBatch:
+    """Materialises replay records as one transfer-efficient typed payload."""
+    as_batch = getattr(records, "as_batch", None)
+    if callable(as_batch):
+        return as_batch(copy=True)
+
+    rows = list(records)
+    if not rows:
+        return {
+            "info_states": np.empty((0, int(info_state_size)), dtype=np.float32),
+            "iterations": np.empty(0, dtype=np.int32),
+            "targets": np.empty((0, int(target_size)), dtype=np.float32),
+        }
+    return {
+        "info_states": np.ascontiguousarray(
+            np.asarray([row.info_state for row in rows], dtype=np.float32).reshape(
+                len(rows), int(info_state_size)
+            )
+        ),
+        "iterations": np.ascontiguousarray(
+            np.asarray([row.iteration for row in rows], dtype=np.int32).reshape(-1)
+        ),
+        "targets": np.ascontiguousarray(
+            np.asarray(
+                [getattr(row, target_attr) for row in rows], dtype=np.float32
+            ).reshape(len(rows), int(target_size))
+        ),
+    }
+
+
+def append_batch_to_buffer(
+    buffer,
+    batch: Mapping[str, np.ndarray],
+    *,
+    record_type: Type,
+) -> None:
+    """Appends a typed payload, retaining compatibility with Python replay."""
+    add_batch = getattr(buffer, "add_batch", None)
+    if callable(add_batch):
+        add_batch(batch)
+        return
+    for info_state, iteration, target in zip(
+        batch["info_states"], batch["iterations"], batch["targets"]
+    ):
+        buffer.add(record_type(info_state, int(iteration), target))
 
 
 class ReservoirBuffer:
@@ -118,9 +173,9 @@ class _CompactReservoirBuffer:
 
     The original replay stores one Python namedtuple plus separate Python/
     NumPy objects per sample. At millions of samples this overhead dominates
-    the actual tensor payload. This buffer keeps the same public interface but
-    stores the payload in contiguous float32/int32 arrays and only materialises
-    namedtuples for sampled minibatches.
+    the actual tensor payload. This buffer keeps the same public interface,
+    stores the payload in contiguous float32/int32 arrays, and exposes direct
+    typed batch insertion and sampling for the optimized learner path.
     """
 
     def __init__(
@@ -213,6 +268,127 @@ class _CompactReservoirBuffer:
             self._iterations[write_index] = int(element.iteration)
             self._targets[write_index] = target
         self._add_calls += 1
+
+    def _validated_batch(
+        self, batch: Mapping[str, np.ndarray]
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        info_states = np.asarray(batch["info_states"], dtype=np.float32)
+        iterations = np.asarray(batch["iterations"], dtype=np.int32).reshape(-1)
+        targets = np.asarray(batch["targets"], dtype=np.float32)
+        count = len(iterations)
+        if info_states.shape != (count, self._info_state_size):
+            raise ValueError(
+                "Expected batched info_states with shape "
+                f"{(count, self._info_state_size)}, got {info_states.shape}"
+            )
+        if targets.shape != (count, self._target_size):
+            raise ValueError(
+                "Expected batched targets with shape "
+                f"{(count, self._target_size)}, got {targets.shape}"
+            )
+        return info_states, iterations, targets
+
+    def add_batch(self, batch: Mapping[str, np.ndarray]) -> None:
+        """Applies exact Algorithm R choices while vectorising array writes.
+
+        Candidate slots are generated with Python's ``random`` module in the
+        same order as repeated :meth:`add` calls. This preserves the existing
+        seeded reservoir trajectory while eliminating per-record NumPy writes.
+        """
+        info_states, iterations, targets = self._validated_batch(batch)
+        count = len(iterations)
+        if count == 0:
+            return
+
+        direct_count = min(
+            count, self._reservoir_buffer_capacity - self._size
+        )
+        if direct_count:
+            target_slice = slice(self._size, self._size + direct_count)
+            source_slice = slice(0, direct_count)
+            self._info_states[target_slice] = info_states[source_slice]
+            self._iterations[target_slice] = iterations[source_slice]
+            self._targets[target_slice] = targets[source_slice]
+            self._size += direct_count
+            self._add_calls += direct_count
+
+        remaining = count - direct_count
+        if not remaining:
+            return
+
+        stream_indices = range(self._add_calls, self._add_calls + remaining)
+        candidate_targets = np.fromiter(
+            (random.randint(0, stream_index) for stream_index in stream_indices),
+            dtype=np.int64,
+            count=remaining,
+        )
+        accepted = np.flatnonzero(
+            candidate_targets < self._reservoir_buffer_capacity
+        )
+        if accepted.size:
+            accepted_targets = candidate_targets[accepted]
+            # Only the last stream item targeting a given slot survives the
+            # equivalent sequence of scalar Algorithm R updates.
+            _, reversed_indices = np.unique(
+                accepted_targets[::-1], return_index=True
+            )
+            final = accepted.size - 1 - reversed_indices
+            source_indices = direct_count + accepted[final]
+            target_indices = accepted_targets[final]
+            self._info_states[target_indices] = info_states[source_indices]
+            self._iterations[target_indices] = iterations[source_indices]
+            self._targets[target_indices] = targets[source_indices]
+        self._add_calls += remaining
+
+    def as_batch(self, *, copy: bool = False) -> ReplayBatch:
+        """Returns the populated replay region without materialising records."""
+        info_states = self._info_states[: self._size]
+        iterations = self._iterations[: self._size]
+        targets = self._targets[: self._size]
+        if copy:
+            info_states = info_states.copy()
+            iterations = iterations.copy()
+            targets = targets.copy()
+        return {
+            "info_states": info_states,
+            "iterations": iterations,
+            "targets": targets,
+        }
+
+    def sample_batch(
+        self,
+        num_samples: int,
+        *,
+        probabilities: np.ndarray | None = None,
+    ) -> ReplayBatch:
+        """Samples directly into typed arrays, without namedtuple creation."""
+        num_samples = int(num_samples)
+        if num_samples < 0:
+            raise ValueError(f"num_samples must be >= 0, got {num_samples}")
+        if num_samples > self._size:
+            raise ValueError(
+                f"Cannot sample {num_samples} elements from a buffer of size "
+                f"{self._size}"
+            )
+        if probabilities is None:
+            indices = random.sample(range(self._size), num_samples)
+        else:
+            probs = np.asarray(probabilities, dtype=np.float64).reshape(-1)
+            if probs.size != self._size:
+                raise ValueError(
+                    f"Expected {self._size} probabilities, got {probs.size}"
+                )
+            indices = np.random.choice(
+                self._size,
+                size=num_samples,
+                replace=False,
+                p=probs,
+            )
+        return {
+            "info_states": self._info_states[indices],
+            "iterations": self._iterations[indices],
+            "targets": self._targets[indices],
+        }
 
     def sample(self, num_samples: int) -> List[Any]:
         """Returns ``num_samples`` distinct elements drawn uniformly at random."""
