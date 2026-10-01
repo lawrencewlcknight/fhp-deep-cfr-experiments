@@ -2,8 +2,10 @@
 
 ## Shared policy evaluation
 
-FHP snapshots are evaluated through the sibling `fhp-evaluation-suite`, not
-through an algorithm-specific copy. The adapter is
+Conventional FHP snapshots use the shared `fhp-evaluation-suite` API. A pinned
+snapshot of that evaluator is bundled for reproducible cloud runs; its
+provenance and minimal SD-CFR extensions are in `fhp_evaluation/VENDORED_FROM.md`.
+The conventional snapshot adapter is
 `deep_cfr_poker.evaluation_adapter`. Install it from this directory with
 `python -m pip install -e ../../fhp-evaluation-suite`; then run
 `fhp-evaluate benchmark SNAPSHOT --deals 10000 --seed 2026` or
@@ -33,6 +35,23 @@ plus lossless binary replay compression. It checks networks, replay, optimiser,
 RNG states and playable policy outputs before interpreting speed measurements.
 Production solver defaults are unchanged. See the
 [experiment specification and local/GCP commands](experiments/fhp/exp1_sd_cfr_efficiency/README.md).
+
+## Experiment 2: optimised SD-CFR, 24 hours
+
+Three seeds (`0, 1, 2`) train concurrently on separate `n2-standard-8` VMs for
+24 active hours each, retaining playable policies at 6, 12, 18 and 24 hours.
+The selected uniform algorithm is unchanged: scripted live inference and
+losslessly packed replay improve implementation efficiency. Historical
+networks are stored once in bounded-memory chunks; no full replay dumps are
+retained. The output is the historical mixture, never the final network alone.
+
+The cloud workflow runs equivalence, capacity and evaluator smoke checks,
+then training, aggregation, an evaluation-cost profile, and sampled evaluation
+against the existing UCV Experiment 1. LBR uses the exact own-reach mixture
+at queried histories, without enumerating the game tree. A failed cost gate
+preserves all training outputs and stops before full evaluation.
+
+See [Experiment 2 configuration and launch instructions](experiments/fhp/exp2_sd_cfr_24h/README.md).
 
 Fresh experiment repository for applying Deep Counterfactual Regret
 Minimisation (Deep CFR) to flop hold'em poker (FHP).

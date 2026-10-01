@@ -530,6 +530,7 @@ class DeepCFRSolver(policy.Policy):
             Callable[["DeepCFRSolver", int, int], None]
         ] = None,
         max_training_seconds: Optional[float] = None,
+        training_clock: Optional[Callable[[], float]] = None,
     ) -> SolveResult:
         """Runs one fixed-budget Deep CFR training phase.
 
@@ -543,13 +544,17 @@ class DeepCFRSolver(policy.Policy):
         advantage fit, receiving solver, player and one-indexed iteration.
         SD-CFR uses it to retain the historical strategy at the correct phase.
         An optional positive finite time budget stops after a complete outer
-        iteration. Archive capture and callbacks are included in that budget.
+        iteration. By default callbacks count towards the budget. An optional
+        monotonic training clock may exclude checkpoint I/O; it must not
+        exclude traversal, optimisation or historical-strategy capture.
         """
         if max_training_seconds is not None and (
             not math.isfinite(float(max_training_seconds)) or float(max_training_seconds) <= 0
         ):
             raise ValueError("max_training_seconds must be positive and finite")
         start_time = time.perf_counter()
+        budget_clock = training_clock or time.perf_counter
+        budget_start = budget_clock()
         advantage_losses: Dict[int, List[float]] = collections.defaultdict(list)
         policy_losses_at_checkpoints: List[Optional[float]] = []
         convs: List[float] = []
@@ -632,7 +637,7 @@ class DeepCFRSolver(policy.Policy):
 
             time_limit_reached = (
                 max_training_seconds is not None
-                and time.perf_counter() - start_time >= float(max_training_seconds)
+                and budget_clock() - budget_start >= float(max_training_seconds)
             )
             evaluate_now = evaluate_now or time_limit_reached
             if not evaluate_now:

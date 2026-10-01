@@ -99,24 +99,26 @@ network at each decision or averaging action probabilities without own-reach
 weights implements a different policy. Both-seat duplicate play needs a fresh
 episode sample for each seat-swapped hand and a controlled separate model RNG.
 
-Do **not** pass this episode-stateful policy directly to the current shared
-average-policy evaluator: it does not resample episodes. In particular, LBR
-must not be allowed to query the secretly sampled historical model as if it
-were the opponent's public strategy. Correct LBR needs a queryable own-reach-
-weighted behavioural mixture, or another carefully specified evaluation method.
-That production evaluation integration belongs in the upcoming FHP experiment;
-it is not claimed complete here. The existing Deep CFR snapshot loader rejects
-SD-CFR archives instead of silently interpreting them as average networks.
+Do **not** pass the low-level `SampledSDCFRPolicy` to a generic average-policy
+evaluator without an episode-reset adapter. Experiment 2 now provides
+`DiskSampledPolicy.begin_episode` and an optional hook in the pinned duplicate
+evaluator. LBR queries a separate `DiskBehaviouralPolicy`: the exact own-reach
+mixture evaluated at the requested history, not the secretly sampled model.
+Its performance on large real archives is guarded by an explicit cloud cost
+profile before full evaluation. The conventional checkpoint loader still
+rejects SD-CFR archives instead of interpreting them as average networks.
 
 Exact behavioural reconstruction helpers are retained for small-game regression
 tests, but explicitly fail for `universal_poker` before enumerating any game tree.
 No exact exploitability calculation is required to train or play on FHP.
 
-All networks currently remain in a CPU archive, as in the source. Inference
-loads only the two episode-selected networks, but archive storage grows with
-iterations; unlike a distilled average policy, this is not constant-size storage.
-Repeatedly saving full prefixes also duplicates data. The forthcoming experiment
-should measure memory and archive size and choose storage/checkpointing deliberately.
+The low-level reference API keeps networks in a CPU archive, as in the source.
+Experiment 2 replaces only that storage layer with lossless immutable disk
+chunks and checkpoint-prefix manifests. It bounds in-memory history storage,
+loads two episode-selected networks for sampled play, and saves historical
+weights only once. Disk storage still grows with iterations; unlike a distilled
+average network, this is not a constant-size policy. No replay/optimiser dumps
+are retained and these playable checkpoints cannot resume training.
 
 ## Verification
 

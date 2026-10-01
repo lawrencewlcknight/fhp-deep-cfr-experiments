@@ -73,7 +73,7 @@ class SingleDeepCFRSolver(DeepCFRSolver):
         })
 
     def solve(self, post_iteration_callback=None, post_player_update_callback=None,
-              max_training_seconds=None):
+              max_training_seconds=None, training_clock=None):
         def capture(solver, player, iteration):
             self.archive.capture_from_solver(solver, player, iteration)
             if post_player_update_callback is not None:
@@ -83,6 +83,7 @@ class SingleDeepCFRSolver(DeepCFRSolver):
             post_iteration_callback=post_iteration_callback,
             post_player_update_callback=capture,
             max_training_seconds=max_training_seconds,
+            training_clock=training_clock,
         )
         self.archive.validate()
         # Do not return the unused compatibility network as a deployable policy.

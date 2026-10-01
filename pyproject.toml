@@ -12,7 +12,7 @@ authors = [{ name = "Lawrence Knight" }]
 license = { text = "MIT" }
 
 [tool.setuptools.packages.find]
-include = ["deep_cfr_poker*", "experiments*"]
+include = ["deep_cfr_poker*", "experiments*", "fhp_evaluation*"]
 exclude = ["outputs*", "tests*"]
 
 [tool.pytest.ini_options]
