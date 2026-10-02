@@ -272,7 +272,9 @@ class _CompactReservoirBuffer:
     def _validated_batch(
         self, batch: Mapping[str, np.ndarray]
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        info_states = np.asarray(batch["info_states"], dtype=np.float32)
+        # Packed subclasses already supply uint8 codes. Preserve their storage
+        # dtype instead of allocating a 4x larger temporary float32 code array.
+        info_states = np.asarray(batch["info_states"], dtype=self._info_states.dtype)
         iterations = np.asarray(batch["iterations"], dtype=np.int32).reshape(-1)
         targets = np.asarray(batch["targets"], dtype=np.float32)
         count = len(iterations)

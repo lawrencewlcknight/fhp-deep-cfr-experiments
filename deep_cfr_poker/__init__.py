@@ -12,11 +12,14 @@ from .game import FHP_GAME_PARAMETERS, load_fhp_game
 from .solver import DeepCFRSolver, SolveResult
 from .sd_cfr import SDCFRArchive, SampledSDCFRPolicy
 from .single_solver import SELECTED_SD_CFR_KWARGS, SingleDeepCFRSolver
+from .sd_cfr_parallel import ParallelSingleDeepCFRSolver, ParallelStructuredSingleDeepCFRSolver
 
 __all__ = [
     "DeepCFRSolver",
     "SolveResult",
     "SingleDeepCFRSolver",
+    "ParallelSingleDeepCFRSolver",
+    "ParallelStructuredSingleDeepCFRSolver",
     "SELECTED_SD_CFR_KWARGS",
     "SDCFRArchive",
     "SampledSDCFRPolicy",

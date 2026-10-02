@@ -54,6 +54,18 @@ This encoding must not be used as quantisation for other game features.
     def add_batch(self, batch):
         super().add_batch({**batch, "info_states": self._pack(batch["info_states"])})
 
+    def add_packed_batch(self, batch, *, feature_encoding):
+        """Insert already encoded worker rows with the same central Algorithm R.
+
+        Workers use this class's lossless codec, not quantisation. Keep the
+        incoming bytes packed instead of reconstructing all dense features.
+        The parent validates dimensions before any reservoir/RNG mutation.
+        """
+        values = np.asarray(batch["info_states"])
+        if feature_encoding != self.feature_encoding or values.dtype != np.uint8:
+            raise ValueError("Packed worker replay encoding mismatch")
+        super().add_batch(batch)
+
     def _record_at(self, index):
         record = super()._record_at(index)
         return record._replace(info_state=self._unpack(record.info_state))
@@ -113,17 +125,11 @@ falling back and mislabelling a benchmark arm.
     packed_buffer_class = PackedAdvantageReservoirBuffer
 
     def __init__(self, game=None, *, pack_replay=True, **kwargs):
+        self._pack_replay = bool(pack_replay)
         super().__init__(game, **kwargs)
         if (self._uses_shared_advantage_trunk or self._reinitialize_advantage_networks
                 or self._replay_buffer_type != "compact"):
             raise ValueError("Optimised SD-CFR requires independent warm-start networks and compact replay")
-        if pack_replay:
-            self._advantage_memories = [
-                self.packed_buffer_class(buffer.capacity,
-                                               info_state_size=self._embedding_size,
-                                               num_actions=self._num_actions)
-                for buffer in self._advantage_memories
-            ]
         self._eager_advantages = self._advantage_networks
         self._scripted_advantages = [torch.jit.script(net) for net in self._eager_advantages]
         for eager, scripted in zip(self._eager_advantages, self._scripted_advantages):
@@ -135,6 +141,11 @@ falling back and mislabelling a benchmark arm.
         self.archive.metadata["execution_optimisations"] = {
             "scripted_live_inference": True, "packed_binary_replay": bool(pack_replay),
         }
+
+    def _make_advantage_buffer(self, capacity, buffer_type, **kwargs):
+        if self._pack_replay and buffer_type == "compact":
+            return self.packed_buffer_class(capacity, **kwargs)
+        return super()._make_advantage_buffer(capacity, buffer_type, **kwargs)
 
     def _collect_traversals_for_player(self, player):
         if self._advantage_networks is not self._eager_advantages:

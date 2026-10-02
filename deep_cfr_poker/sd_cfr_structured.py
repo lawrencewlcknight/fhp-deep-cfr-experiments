@@ -30,13 +30,17 @@ class StructuredAdvantageReservoirBuffer(PackedAdvantageReservoirBuffer):
                 or not np.array_equal(scaled / DENOMINATORS, values)):
             raise ValueError("Features are outside the exact structured v1 alphabet")
         numerators = scaled.astype(np.uint8)
-        bits = ((numerators[..., None] >> np.asarray([0, 1], dtype=np.uint8)) & 1)
-        return np.packbits(bits.reshape(*values.shape[:-1], FEATURE_SIZE * 2), axis=-1, bitorder="little")
+        encoded = np.zeros((*values.shape[:-1], (FEATURE_SIZE + 3) // 4), dtype=np.uint8)
+        # Four vectorised lanes, not a Python loop over rows or features.
+        # Avoid materialising two separate bits for every feature.
+        for lane in range(4):
+            part = numerators[..., lane::4]
+            encoded[..., :part.shape[-1]] |= part << (2 * lane)
+        return encoded
 
     def _unpack(self, features):
-        bits = np.unpackbits(features, axis=-1, count=FEATURE_SIZE * 2, bitorder="little")
-        bits = bits.reshape(*bits.shape[:-1], FEATURE_SIZE, 2)
-        numerators = bits[..., 0] + 2 * bits[..., 1]
+        numerators = (np.asarray(features)[..., None] >> np.asarray([0, 2, 4, 6], dtype=np.uint8)) & 3
+        numerators = numerators.reshape(*numerators.shape[:-2], numerators.shape[-2] * 4)[..., :FEATURE_SIZE]
         return numerators.astype(np.float32) / DENOMINATORS
 
 

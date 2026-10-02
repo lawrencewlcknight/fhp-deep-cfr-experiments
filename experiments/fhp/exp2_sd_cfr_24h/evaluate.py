@@ -36,6 +36,9 @@ def checkpoint_index(root, *, smoke=False, experiment=default_experiment):
             raise ValueError(f"Wrong SD-CFR experiment: {manifest_path}")
         if bool(manifest.get("smoke", False)) != smoke:
             raise ValueError("Smoke/production source mismatch")
+        if hasattr(experiment, "execution_config"):
+            if manifest.get("execution") != experiment.execution_config(int(manifest["seed"])):
+                raise ValueError("Worker execution configuration differs from the experiment contract")
         worker = manifest_path.parent
         if not (worker / "SUCCESS.json").is_file() or (worker / "FAILURE.json").exists():
             raise ValueError("Incomplete training worker")
@@ -49,6 +52,14 @@ def checkpoint_index(root, *, smoke=False, experiment=default_experiment):
             reader = DiskArchiveReader(path, game)
             if reader.contract.get("metadata", {}).get("feature_encoder") != experiment.FEATURE_ENCODER_METADATA:
                 raise ValueError("Checkpoint encoder differs from the experiment contract")
+            if hasattr(experiment, "execution_config"):
+                execution = reader.contract["metadata"].get("parallel_execution", {})
+                expected = experiment.execution_config(int(manifest["seed"]))
+                if (execution.get("backend") != "ray_parallel_sd_cfr"
+                        or execution.get("workers") != expected["parallel_num_workers"]
+                        or execution.get("run_seed") != expected["parallel_run_seed"]
+                        or execution != manifest.get("parallel_execution")):
+                    raise ValueError("Checkpoint parallel execution metadata mismatch")
             records.append(dict(experiment=experiment.REPORT_ID,
                                 seed=int(manifest["seed"]), training_hours=int(row["checkpoint_target_hours"]),
                                 active_seconds=float(row["actual_training_elapsed_seconds"]),

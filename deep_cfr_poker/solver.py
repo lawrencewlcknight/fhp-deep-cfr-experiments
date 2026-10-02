@@ -326,7 +326,7 @@ class DeepCFRSolver(policy.Policy):
 
         # Per-player advantage networks.
         self._advantage_memories = [
-            make_advantage_buffer(
+            self._make_advantage_buffer(
                 memory_capacity,
                 self._replay_buffer_type,
                 info_state_size=self._embedding_size,
@@ -386,6 +386,10 @@ class DeepCFRSolver(policy.Policy):
         self._warned_strategy_buffer_too_small = False
 
     # ------------------------------------------------------------------ helpers
+
+    def _make_advantage_buffer(self, capacity, buffer_type, **kwargs):
+        """Allocation hook for lossless replay representations."""
+        return make_advantage_buffer(capacity, buffer_type, **kwargs)
 
     @property
     def advantage_buffers(self) -> List[ReservoirBuffer]:

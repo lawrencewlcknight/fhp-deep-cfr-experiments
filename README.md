@@ -22,6 +22,12 @@ historical advantage networks instead of fitting an average-policy network.
 The FHP game and existing compact replay/traversal optimisations are retained.
 
 See [SD-CFR usage, provenance and evaluation restrictions](docs/SD_CFR.md).
+Opt-in traversal parallelism is available through
+`ParallelSingleDeepCFRSolver` (raw inputs) and
+`ParallelStructuredSingleDeepCFRSolver` (Experiment 3/4 structured inputs).
+Both use Ray workers and one central learner, without fitting an average-policy
+network. See the [parallel solver instructions](docs/SD_CFR.md#parallel-traversal-solver).
+Existing numbered experiments still use their sequential solvers.
 The former conventional Deep CFR Experiment 1 is archived; the active
 Experiment 1 is now the SD-CFR efficiency audit below, not a long-horizon
 training run. SD-CFR archives are not conventional policy snapshots
@@ -79,6 +85,19 @@ Results have a dedicated experiment/report identity. No cloud comparisons or
 full resumable training states are added.
 
 See [Experiment 4 specification and launch instructions](experiments/fhp/exp4_sd_cfr_structured_n2_standard16/README.md).
+
+## Experiment 5: Experiment 4 with eight traversal workers
+
+The same three seeds train for 24 active hours on the same three
+`n2-standard-16` VMs, with eight Ray traversal actors within each VM.
+The total traversal budget remains 320 per player per iteration (40 per actor);
+network training, structured inputs, replay, policy checkpoints and evaluation
+are unchanged. Cloud smoke checks real eight-actor correctness and checkpoint
+compatibility before starting the long runs. Use the same code revision for the
+sequential and parallel arms; their random streams differ, so identical
+trajectories are not expected. No cloud run is launched automatically.
+
+See [Experiment 5 specification and launch instructions](experiments/fhp/exp5_sd_cfr_parallel_24h/README.md).
 
 Fresh experiment repository for applying Deep Counterfactual Regret
 Minimisation (Deep CFR) to flop hold'em poker (FHP).

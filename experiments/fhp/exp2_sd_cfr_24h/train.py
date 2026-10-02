@@ -68,7 +68,8 @@ def run_worker(output_root, seed, *, smoke=False, remote_uri=None,
     torch.set_num_interop_threads(1)
     set_seed(seed)
     config = experiment.solver_config(smoke)
-    solver = solver_class(pack_replay=True, **config)
+    execution = (experiment.execution_config(seed) if hasattr(experiment, "execution_config") else {})
+    solver = solver_class(pack_replay=True, **config, **execution)
     archive = DiskSDCFRArchive(solver, root / "archive", chunk_iterations=2 if smoke else 128)
     solver.archive = archive
     schedule = (0.01, 0.02, 0.03, 0.04) if smoke else experiment.SECONDS
@@ -88,6 +89,10 @@ def run_worker(output_root, seed, *, smoke=False, remote_uri=None,
                     archive_capture_included_in_training_time=True,
                     node_definition="calls_to_external_sampling_traversal_including_terminal_states",
                     exact_exploitability=False)
+    if execution:
+        manifest.update(execution=execution, parallel_execution=archive.metadata["parallel_execution"],
+                        parallel_startup_included_in_training_time=True,
+                        peak_rss_scope="central_learner_only_excludes_ray_and_actors")
     write_json(root / "run_manifest.json", manifest)
     records, telemetry = [], []
     clock = ActiveClock()
@@ -107,6 +112,15 @@ def run_worker(output_root, seed, *, smoke=False, remote_uri=None,
                    archive_iterations=archive.count,
                    archive_bytes=sum(chunk["size_bytes"] for chunk in archive.chunks),
                    checkpoint_overhead_seconds=clock.excluded)
+        if execution:
+            phase = active_solver.last_parallel_collection
+            # This is the final player phase, not a whole-iteration timing.
+            row.update(traversal_workers=active_solver.parallel_num_workers,
+                       last_phase_player=phase["player"],
+                       last_phase_traversals=phase["traversals"],
+                       last_phase_collection_seconds=phase["seconds"],
+                       last_phase_cache_hits=phase["inference_cache_hits"],
+                       last_phase_cache_misses=phase["inference_cache_misses"])
         telemetry.append(row)
         if iteration % 25 == 0 or smoke:
             print(json.dumps(row), flush=True)
@@ -170,6 +184,10 @@ def run_worker(output_root, seed, *, smoke=False, remote_uri=None,
     except Exception as error:
         write_json(root / "FAILURE.json", dict(error=repr(error), active_seconds=clock()))
         raise
+    finally:
+        close = getattr(solver, "close", None)
+        if close is not None:
+            close()
     return root
 
 

@@ -97,10 +97,15 @@ python -m {module}.train --seed "$SEED" --output-root "$OUT" --remote-uri "$REMO
     if stage == "smoke":
         test_files = " ".join(q(path) for path in
                               (spec["test_file"], *spec.get("extra_test_files", ())))
+        ray_check = ""
+        if spec.get("parallel_smoke"):
+            ray_check = (f"RUN_RAY_SD_CFR_TESTS=1 python -m pytest -q {q(spec['test_file'])} "
+                         "tests/test_sd_cfr_parallel.py -k real_ray\n")
         return text + f"""
 trap 'code=$?; gcloud storage rsync --recursive "$OUT" {q(remote + '/smoke')} || true; exit "$code"' EXIT
 python -m pip install -r requirements-dev.txt
 python -m pytest -q {test_files} tests/test_single_solver.py tests/test_sd_cfr_efficiency.py
+{ray_check}
 python -m experiments.fhp.exp1_sd_cfr_efficiency.run --seeds 0 1 2 --repeats 1 --output-dir "$OUT/equivalence"
 python -m {module}.stress --output "$OUT/capacity_stress.json"
 python -m {module}.train --seed 0 --smoke --output-root "$OUT/training"
