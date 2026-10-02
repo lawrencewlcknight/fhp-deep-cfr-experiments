@@ -44,6 +44,11 @@ def test_selected_learner_contract():
 def test_fhp_train_archive_reload_and_play_without_tree_enumeration(
     fhp_game, tmp_path, monkeypatch, backend
 ):
+    # This tiny coverage test must not inherit RNG state from preceding tests.
+    # An opponent can otherwise fold on every sampled traversal before the
+    # second player acts, legitimately leaving that player's replay empty.
+    # Seed 32 exercises both learners with either replay implementation.
+    set_seed(32)
     def forbidden(*args, **kwargs):
         raise AssertionError("Average-policy fitting/tree enumeration is forbidden")
     monkeypatch.setattr(DeepCFRSolver, "_learn_strategy_network", forbidden)
@@ -60,7 +65,10 @@ def test_fhp_train_archive_reload_and_play_without_tree_enumeration(
     assert not solver._optimizer_policy.state
     assert solver.strategy_buffer.add_calls == 0
     assert solver.strategy_buffer.capacity == 1
-    assert all(len(buffer) > 0 for buffer in solver.advantage_buffers)
+    replay_rows = [len(buffer) for buffer in solver.advantage_buffers]
+    assert all(rows >= SMALL["batch_size_advantage"] for rows in replay_rows), (
+        f"Coverage fixture must supply a training batch for both players: {replay_rows}"
+    )
     assert solver._optimizer_advantages == optimizers  # continuous Adam state
     assert all(opt.state for opt in optimizers)
     assert all(any(not torch.equal(initial[k], net.state_dict()[k]) for k in initial)
