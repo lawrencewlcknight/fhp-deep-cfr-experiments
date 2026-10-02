@@ -30,7 +30,7 @@ def test_only_approved_experiment_and_no_outputs():
         for path in (ROOT / "experiments" / "fhp").iterdir()
         if path.name not in {"__init__.py", "__pycache__"}
     )
-    assert experiment_children == ["archive_exp1_deep_cfr_best_config_transfer", "exp1_sd_cfr_efficiency", "exp2_sd_cfr_24h", "exp3_sd_cfr_structured_24h"]
+    assert experiment_children == ["archive_exp1_deep_cfr_best_config_transfer", "exp1_sd_cfr_efficiency", "exp2_sd_cfr_24h", "exp3_sd_cfr_structured_24h", "exp4_sd_cfr_structured_n2_standard16"]
 
     output_children = sorted(path.name for path in (ROOT / "outputs").iterdir())
     assert output_children == [".gitkeep"]

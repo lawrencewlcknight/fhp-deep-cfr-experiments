@@ -95,10 +95,12 @@ trap finish EXIT
 python -m {module}.train --seed "$SEED" --output-root "$OUT" --remote-uri "$REMOTE"
 """
     if stage == "smoke":
+        test_files = " ".join(q(path) for path in
+                              (spec["test_file"], *spec.get("extra_test_files", ())))
         return text + f"""
 trap 'code=$?; gcloud storage rsync --recursive "$OUT" {q(remote + '/smoke')} || true; exit "$code"' EXIT
 python -m pip install -r requirements-dev.txt
-python -m pytest -q {q(spec['test_file'])} tests/test_single_solver.py tests/test_sd_cfr_efficiency.py
+python -m pytest -q {test_files} tests/test_single_solver.py tests/test_sd_cfr_efficiency.py
 python -m experiments.fhp.exp1_sd_cfr_efficiency.run --seeds 0 1 2 --repeats 1 --output-dir "$OUT/equivalence"
 python -m {module}.stress --output "$OUT/capacity_stress.json"
 python -m {module}.train --seed 0 --smoke --output-root "$OUT/training"
@@ -145,6 +147,11 @@ def build_job(args, stage):
         machine, cpu, memory, disk, seconds = "e2-small", 1000, 1500, 30, 604800
     else:
         machine, cpu, memory, disk = "n2-standard-8", 8000, 30000, 200
+        if stage in {"smoke", "train"}:
+            resources = settings(args).get("training_resources", {})
+            machine = resources.get("machine_type", machine)
+            cpu = resources.get("cpu_milli", cpu)
+            memory = resources.get("memory_mib", memory)
         seconds = {"train": 129600, "smoke": 7200, "aggregate": 14400,
                    "profile": 14400, "evaluate": int((args.eval_max_hours + 2) * 3600)}[stage]
     count = 3 if stage == "train" else 1

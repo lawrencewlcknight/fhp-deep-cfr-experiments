@@ -43,3 +43,15 @@ resources. No test downloads UCV data or launches paid jobs.
 python -m pytest -q tests/test_exp3_sd_cfr_structured.py
 bash gcp/run_exp3_sd_cfr_structured_24h.sh smoke-local
 ```
+
+Experiment 4 checks that only the training/smoke VM allocation and experiment
+identity change relative to Experiment 3. It tests unchanged solver/encoder
+settings, independent per-seed VMs, baseline auxiliary resources, correct CLI
+routing, stdlib-only controller dry runs, stale-ref rejection, and a real short
+training run with checkpoint reload and hardware/thread metadata checks. Cloud
+smoke also runs Experiment 3's full structured-representation regression suite.
+
+```bash
+python -m pytest -q tests/test_exp4_sd_cfr_structured_n2_standard16.py
+bash gcp/run_exp4_sd_cfr_structured_n2_standard16.sh smoke-local
+```

@@ -67,6 +67,19 @@ evaluation uses the versioned encoder too. No other experiment outputs are requi
 
 See [Experiment 3 specification and launch instructions](experiments/fhp/exp3_sd_cfr_structured_24h/README.md).
 
+## Experiment 4: Experiment 3 on n2-standard-16
+
+The same structured-input learner runs for 24 active hours on three separate
+**n2-standard-16 (16 vCPU, 64 GiB)** VMs. Training seeds, networks, encoder,
+optimisation, replay, checkpoints and standalone evaluation are unchanged.
+Traversal remains sequential with one Torch thread; this tests hardware size,
+not parallel SD-CFR, so a substantial speed-up is not assumed. The smoke uses
+the larger VM; other auxiliary stages retain their baseline resources.
+Results have a dedicated experiment/report identity. No cloud comparisons or
+full resumable training states are added.
+
+See [Experiment 4 specification and launch instructions](experiments/fhp/exp4_sd_cfr_structured_n2_standard16/README.md).
+
 Fresh experiment repository for applying Deep Counterfactual Regret
 Minimisation (Deep CFR) to flop hold'em poker (FHP).
 

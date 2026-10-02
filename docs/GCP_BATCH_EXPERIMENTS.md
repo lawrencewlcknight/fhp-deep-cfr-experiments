@@ -1,5 +1,8 @@
 # Running Experiment 1: FHP SD-CFR efficiency audit
 
+For **Experiment 4 (Experiment 3 on n2-standard-16)**, see its
+[configuration and launch guide](../experiments/fhp/exp4_sd_cfr_structured_n2_standard16/README.md).
+
 For **Experiment 3 (structured player inputs)**, see its
 [configuration and launch guide](../experiments/fhp/exp3_sd_cfr_structured_24h/README.md).
 
