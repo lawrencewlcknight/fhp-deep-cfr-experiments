@@ -10,6 +10,7 @@ from scipy.stats import t
 
 from deep_cfr_poker.sd_cfr_disk import write_json
 from .train import write_csv
+from . import config as default_experiment
 
 
 def summary(values):
@@ -26,10 +27,14 @@ def summary(values):
 
 def evaluation_report(results, sd, output, *, smoke=False):
     output = Path(output)
+    experiment_ids = {row["experiment"] for row in sd}
+    if len(experiment_ids) != 1:
+        raise ValueError("Expected one standalone experiment")
+    experiment_id = experiment_ids.pop()
     if any(item["task"]["kind"] not in {"rule", "lbr", "temporal"} for item in results):
         raise ValueError("Only standalone SD-CFR evaluation tasks are supported")
     rows = [dict(**{k: v for k, v in item["task"].items() if not k.startswith("path_")},
-                 **item["result"], evaluation_seconds=item["elapsed_seconds"], experiment="sd_cfr_exp2")
+                 **item["result"], evaluation_seconds=item["elapsed_seconds"], experiment=experiment_id)
             for item in results]
     write_csv(output / "evaluation_tasks.csv", rows)
     rule = [r for r in rows if r["kind"] == "rule"]
@@ -41,7 +46,7 @@ def evaluation_report(results, sd, output, *, smoke=False):
     lbr = []
     for (seed, hour), shards in sorted(grouped.items()):
         counts = np.array([s["num_deals"] for s in shards])
-        lbr.append(dict(experiment="sd_cfr_exp2", training_seed=seed, training_hours=hour,
+        lbr.append(dict(experiment=experiment_id, training_seed=seed, training_hours=hour,
                         kind="lbr", num_deals=int(counts.sum()),
                         mean_mbb_per_hand=float(np.average([s["mean_mbb_per_hand"] for s in shards], weights=counts)),
                         interpretation="sampled_LBR_value_not_exact_exploitability"))
@@ -119,9 +124,9 @@ def evaluation_report(results, sd, output, *, smoke=False):
         "Playable checkpoints and evaluator provenance are retained for later comparative analysis.\n")
 
 
-def training_report(source, output):
+def training_report(source, output, *, experiment=default_experiment):
     from .evaluate import checkpoint_index
-    rows = checkpoint_index(source)
+    rows = checkpoint_index(source, experiment=experiment)
     output.mkdir(parents=True, exist_ok=True)
     write_csv(output / "checkpoint_index.csv", rows)
     aggregates = []
@@ -146,9 +151,13 @@ def training_report(source, output):
                                                       exact_exploitability=False))
 
 
-if __name__ == "__main__":
+def main(*, experiment=default_experiment):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    training_report(args.source, args.output)
+    training_report(args.source, args.output, experiment=experiment)
+
+
+if __name__ == "__main__":
+    main()

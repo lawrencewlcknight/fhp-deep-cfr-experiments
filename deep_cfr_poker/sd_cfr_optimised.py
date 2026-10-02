@@ -20,12 +20,14 @@ including its Python RNG consumption. Only sampled features are unpacked.
 Non-binary inputs fail closed, including records the reservoir would discard.
 This encoding must not be used as quantisation for other game features.
 """
+    bits_per_feature = 1
+    feature_encoding = "binary_packbits_little_v1"
 
     def __init__(self, capacity, *, info_state_size, num_actions):
         self.feature_count = int(info_state_size)
         if self.feature_count <= 0:
             raise ValueError("info_state_size must be positive")
-        super().__init__(capacity, info_state_size=(self.feature_count + 7) // 8,
+        super().__init__(capacity, info_state_size=(self.feature_count * self.bits_per_feature + 7) // 8,
                          num_actions=num_actions)
 
     def _allocate_arrays(self, capacity):
@@ -67,12 +69,12 @@ This encoding must not be used as quantisation for other game features.
         return batch
 
     def state_dict(self):
-        return {**super().state_dict(), "feature_encoding": "binary_packbits_little_v1",
+        return {**super().state_dict(), "feature_encoding": self.feature_encoding,
                 "original_info_state_size": self.feature_count}
 
     def load_state_dict(self, state):
         encoding = state.get("feature_encoding")
-        if encoding == "binary_packbits_little_v1":
+        if encoding == self.feature_encoding:
             if int(state["original_info_state_size"]) != self.feature_count:
                 raise ValueError("Packed replay feature count mismatch")
             values = np.asarray(state["info_states"])
@@ -108,6 +110,7 @@ their parameters, so player 1 traversals see player 0's just-completed update.
 No freeze/trace is used. Unsupported configurations fail rather than silently
 falling back and mislabelling a benchmark arm.
 """
+    packed_buffer_class = PackedAdvantageReservoirBuffer
 
     def __init__(self, game=None, *, pack_replay=True, **kwargs):
         super().__init__(game, **kwargs)
@@ -116,7 +119,7 @@ falling back and mislabelling a benchmark arm.
             raise ValueError("Optimised SD-CFR requires independent warm-start networks and compact replay")
         if pack_replay:
             self._advantage_memories = [
-                PackedAdvantageReservoirBuffer(buffer.capacity,
+                self.packed_buffer_class(buffer.capacity,
                                                info_state_size=self._embedding_size,
                                                num_actions=self._num_actions)
                 for buffer in self._advantage_memories

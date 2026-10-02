@@ -55,6 +55,18 @@ preserves all training outputs and stops before full evaluation.
 
 See [Experiment 2 configuration and launch instructions](experiments/fhp/exp2_sd_cfr_24h/README.md).
 
+## Experiment 3: suit-canonical structured inputs, 24 hours
+
+Experiment 3 retains Experiment 2's three seeds, 24-hour budgets, hardware,
+8 x 32 residual networks and standalone evaluation. Only the input representation
+changes to the exact 183-value **player-observable** encoder from FHP UCV-ESCHER
+Experiment 2. This includes lossless suit canonicalisation and derived poker
+features, but not the UCV network architecture, critic input, or later features.
+Compact two-bit replay preserves every float32 input exactly; historical-policy
+evaluation uses the versioned encoder too. No other experiment outputs are required.
+
+See [Experiment 3 specification and launch instructions](experiments/fhp/exp3_sd_cfr_structured_24h/README.md).
+
 Fresh experiment repository for applying Deep Counterfactual Regret
 Minimisation (Deep CFR) to flop hold'em poker (FHP).
 

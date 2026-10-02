@@ -20,17 +20,19 @@ from deep_cfr_poker.sd_cfr_disk import (DiskArchiveReader, DiskSampledPolicy,
 from fhp_evaluation.duplicate import evaluate_duplicate_match
 from fhp_evaluation.lbr import LBRConfig, LocalBestResponsePolicy
 from fhp_evaluation.rule_agents import PUBLISHED_AGENT_NAMES, published_rule_agents
-from .config import (ALGORITHM_ID, EXPERIMENT_NAME, SEEDS, HOURS, BASE_SEED, RULE_DEALS,
+from . import config as default_experiment
+from .config import (SEEDS, HOURS, BASE_SEED, RULE_DEALS,
                      LBR_DEALS, LBR_ROLLOUTS, LBR_SHARD_DEALS, CROSSPLAY_DEALS)
 from .train import write_csv
 
 
-def checkpoint_index(root, *, smoke=False):
+def checkpoint_index(root, *, smoke=False, experiment=default_experiment):
     records = []
     game = load_fhp_game()
     for manifest_path in sorted(Path(root).glob("workers/*/run_manifest.json")):
         manifest = json.loads(manifest_path.read_text())
-        if manifest.get("experiment_name") != EXPERIMENT_NAME or manifest.get("algorithm_id") != ALGORITHM_ID:
+        if (manifest.get("experiment_name") != experiment.EXPERIMENT_NAME
+                or manifest.get("algorithm_id") != experiment.ALGORITHM_ID):
             raise ValueError(f"Wrong SD-CFR experiment: {manifest_path}")
         if bool(manifest.get("smoke", False)) != smoke:
             raise ValueError("Smoke/production source mismatch")
@@ -44,8 +46,10 @@ def checkpoint_index(root, *, smoke=False):
             path = (worker / row["path"]).resolve()
             if not path.is_relative_to(worker.resolve()) or sha256(path) != row["sha256"]:
                 raise ValueError("Checkpoint path/integrity mismatch")
-            DiskArchiveReader(path, game)
-            records.append(dict(experiment="sd_cfr_exp2",
+            reader = DiskArchiveReader(path, game)
+            if reader.contract.get("metadata", {}).get("feature_encoder") != experiment.FEATURE_ENCODER_METADATA:
+                raise ValueError("Checkpoint encoder differs from the experiment contract")
+            records.append(dict(experiment=experiment.REPORT_ID,
                                 seed=int(manifest["seed"]), training_hours=int(row["checkpoint_target_hours"]),
                                 active_seconds=float(row["actual_training_elapsed_seconds"]),
                                 nodes_touched=int(row["nodes_touched"]), path=str(path),
@@ -86,6 +90,7 @@ def make_tasks(records, *, smoke=False):
                               evaluation_seed=BASE_SEED + 2000000 + earlier * 1000 + later))
     root = Path(__file__).resolve().parents[3]
     sources = [Path(__file__), root / "deep_cfr_poker/sd_cfr_disk.py",
+               root / "deep_cfr_poker/fhp_features.py",
                root / "deep_cfr_poker/networks.py", root / "deep_cfr_poker/game.py",
                *sorted((root / "fhp_evaluation").glob("*.py"))]
     implementation = hashlib.sha256(json.dumps({str(p.relative_to(root)): sha256(p) for p in sources},
@@ -211,7 +216,7 @@ def profile(tasks, output, *, workers, max_hours):
     return report
 
 
-def main():
+def main(*, experiment=default_experiment):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("profile", "run", "smoke"))
     parser.add_argument("--source", type=Path, required=True)
@@ -222,7 +227,7 @@ def main():
     if not 1 <= args.workers <= 8 or not 0 < args.max_hours <= 96:
         parser.error("Use 1..8 workers and an evaluation budget in (0, 96] hours")
     smoke = args.mode == "smoke"
-    sd = checkpoint_index(args.source, smoke=smoke)
+    sd = checkpoint_index(args.source, smoke=smoke, experiment=experiment)
     tasks = make_tasks(sd, smoke=smoke)
     args.output.mkdir(parents=True, exist_ok=True)
     write_csv(args.output / "checkpoint_index.csv", sd)
@@ -236,6 +241,9 @@ def main():
                 or checked["estimated_elapsed_hours_with_2x_margin"] > args.max_hours):
             raise ValueError("A matching successful cost profile is required before full evaluation")
     manifest = dict(status="running", smoke=smoke, exact_exploitability=False,
+                    experiment_name=experiment.EXPERIMENT_NAME,
+                    algorithm_id=experiment.ALGORITHM_ID,
+                    feature_encoder=experiment.FEATURE_ENCODER_METADATA,
                     seeds=sorted({r["seed"] for r in sd}), hours=list(HOURS),
                     evaluated_hours=sorted({task["training_hours"] for task in tasks}),
                     evaluation_scope="standalone_sd_cfr",

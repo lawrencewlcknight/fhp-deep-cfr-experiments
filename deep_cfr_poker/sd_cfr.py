@@ -92,6 +92,8 @@ class SDCFRArchive:
             int(width) for width in advantage_network_layers
         )
         self.metadata = dict(metadata or {})
+        from .fhp_features import encoder_from_metadata
+        self.feature_encoder = encoder_from_metadata(self.metadata.get("feature_encoder"))
         self._entries: Dict[int, List[AdvantageSnapshot]] = {
             player: [] for player in range(self.num_players)
         }
@@ -172,10 +174,15 @@ class SDCFRArchive:
                         f"schedule: player 0={reference}, player {player}={candidate}"
                     )
 
+    def information_state(self, state, player):
+        if self.feature_encoder is not None:
+            return self.feature_encoder.information_state(state, player)
+        return state.information_state_tensor(player)
+
     def validate_game(self, game) -> None:
         """Reject archives with incompatible input, action or game contracts."""
         dimensions = (game.num_players(), game.num_distinct_actions(),
-                      len(game.new_initial_state().information_state_tensor(0)))
+                      len(self.information_state(game.new_initial_state(), 0)))
         if dimensions != (self.num_players, self.num_actions, self.embedding_size):
             raise ValueError("SD-CFR archive dimensions do not match the game")
         expected = self.metadata.get("game_string")
@@ -571,7 +578,7 @@ class SampledSDCFRPolicy(osp_policy.Policy):
         if not legal_actions:
             return {}
         info_state = np.asarray(
-            state.information_state_tensor(player), dtype=np.float32
+            self._archive.information_state(state, player), dtype=np.float32
         )
         with torch.no_grad():
             raw = self._networks[player](
@@ -630,7 +637,7 @@ class HistoricalSDCFRPolicy(osp_policy.Policy):
         if not legal_actions:
             return {}
         info_state = np.asarray(
-            state.information_state_tensor(player), dtype=np.float32
+            self._archive.information_state(state, player), dtype=np.float32
         )
         with torch.no_grad():
             raw = self._networks[player](

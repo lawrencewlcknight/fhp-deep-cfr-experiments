@@ -3,6 +3,8 @@ from deep_cfr_poker.single_solver import SELECTED_SD_CFR_KWARGS
 
 EXPERIMENT_NAME = "exp2_sd_cfr_24h"
 ALGORITHM_ID = "optimised_uniform_sd_cfr"
+REPORT_ID = "sd_cfr_exp2"
+FEATURE_ENCODER_METADATA = None
 SEEDS = (0, 1, 2)
 HOURS = (6, 12, 18, 24)
 SECONDS = tuple(hour * 3600 for hour in HOURS)

@@ -1,5 +1,8 @@
 # Running Experiment 1: FHP SD-CFR efficiency audit
 
+For **Experiment 3 (structured player inputs)**, see its
+[configuration and launch guide](../experiments/fhp/exp3_sd_cfr_structured_24h/README.md).
+
 For the new **three-seed 24-hour Experiment 2**, see the
 [dedicated configuration and cloud launch guide](../experiments/fhp/exp2_sd_cfr_24h/README.md).
 It uses a remote controller and three separate training VMs; the instructions

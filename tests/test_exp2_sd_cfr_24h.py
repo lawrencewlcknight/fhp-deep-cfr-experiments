@@ -324,7 +324,7 @@ def test_production_profile_and_evaluation_cli_need_only_own_checkpoints(tmp_pat
                     sha256="abc", nodes_touched=100000 * h) for s in SEEDS for h in HOURS]
     source = tmp_path / "own_checkpoints"
     output = tmp_path / "evaluation"
-    def index(root, *, smoke=False):
+    def index(root, *, smoke=False, experiment=None):
         assert root == source and not smoke
         return records
     def run_tasks(tasks, output, *, workers):

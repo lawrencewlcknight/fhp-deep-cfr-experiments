@@ -226,7 +226,7 @@ class DeepCFRSolver(policy.Policy):
         self._advantage_network_train_steps = int(advantage_network_train_steps)
         self._num_players = game.num_players()
         self._root_node = self._game.new_initial_state()
-        self._embedding_size = len(self._root_node.information_state_tensor(0))
+        self._embedding_size = len(self._information_state(self._root_node, 0))
         self._num_iterations = int(num_iterations)
         self._num_traversals = int(num_traversals)
         self._reinitialize_advantage_networks = bool(reinitialize_advantage_networks)
@@ -835,6 +835,10 @@ class DeepCFRSolver(policy.Policy):
             ):
                 network.train(was_training)
 
+    def _information_state(self, state, player):
+        """Override only for explicitly versioned input-representation experiments."""
+        return np.asarray(state.information_state_tensor(player), dtype=np.float32)
+
     def _traverse_game_tree(self, state, player: int) -> float:
         """External-sampling traversal that populates the replay buffers.
 
@@ -851,7 +855,7 @@ class DeepCFRSolver(policy.Policy):
 
         if state.current_player() == player:
             info_state = np.asarray(
-                state.information_state_tensor(player), dtype=np.float32
+                self._information_state(state, player), dtype=np.float32
             )
             _, strategy = self._sample_action_from_advantage(
                 state, player, info_state=info_state
@@ -884,7 +888,7 @@ class DeepCFRSolver(policy.Policy):
         # average-policy training target and sample one action to descend.
         other_player = state.current_player()
         info_state = np.asarray(
-            state.information_state_tensor(other_player), dtype=np.float32
+            self._information_state(state, other_player), dtype=np.float32
         )
         _, strategy = self._sample_action_from_advantage(
             state, other_player, info_state=info_state
@@ -928,7 +932,7 @@ class DeepCFRSolver(policy.Policy):
         """
         if info_state is None:
             info_state = np.asarray(
-                state.information_state_tensor(player), dtype=np.float32
+                self._information_state(state, player), dtype=np.float32
             )
         legal_actions = state.legal_actions(player)
         net = self._advantage_networks[player]
@@ -969,7 +973,7 @@ class DeepCFRSolver(policy.Policy):
         if not legal_actions:
             return {}
         info_state_vector = np.asarray(
-            state.information_state_tensor(cur_player), dtype=np.float32
+            self._information_state(state, cur_player), dtype=np.float32
         )
         if info_state_vector.ndim == 1:
             info_state_vector = np.expand_dims(info_state_vector, axis=0)
@@ -1024,7 +1028,7 @@ class DeepCFRSolver(policy.Policy):
             if key not in seen:
                 seen.add(key)
                 info_state = np.asarray(
-                    state.information_state_tensor(player), dtype=np.float32
+                    self._information_state(state, player), dtype=np.float32
                 )
                 was_training = self._policy_network.training
                 self._policy_network.eval()

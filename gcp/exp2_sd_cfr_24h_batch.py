@@ -16,6 +16,13 @@ import time
 REPO_URL = "https://github.com/lawrencewlcknight/fhp-deep-cfr-experiments.git"
 MODULE = "experiments.fhp.exp2_sd_cfr_24h"
 STAGES = ("smoke", "train", "aggregate", "profile", "evaluate")
+DEFAULT_EXPERIMENT = dict(number=2, module=MODULE, algorithm_id="optimised_uniform_sd_cfr",
+                          batch_script="gcp/exp2_sd_cfr_24h_batch.py",
+                          test_file="tests/test_exp2_sd_cfr_24h.py")
+
+
+def settings(args):
+    return getattr(args, "experiment", DEFAULT_EXPERIMENT)
 
 
 def q(value):
@@ -63,17 +70,19 @@ mkdir -p "$OUT" "$INPUT"
 
 
 def script(args, stage):
+    spec = settings(args)
+    module = spec["module"]
     env = "\n".join(f"export {key}={q(value)}" for key, value in environment(args).items())
     remote = f"{args.bucket}/{args.run_id}"
     if stage == "controller":
         return bootstrap(args, controller=True) + env + "\n" + (
-            f"exec python3 gcp/exp2_sd_cfr_24h_batch.py orchestrate --start-stage {q(args.start_stage)}\n")
+            f"exec python3 {q(spec['batch_script'])} orchestrate --start-stage {q(args.start_stage)}\n")
     text = bootstrap(args) + env + "\n"
     if stage == "train":
         return text + f"""
 SEED="${{BATCH_TASK_INDEX:?Missing Batch task index}}"
 case "$SEED" in 0|1|2) ;; *) exit 2 ;; esac
-TASK="task_$(printf '%03d' "$SEED")_optimised_uniform_sd_cfr_seed_$SEED"
+TASK="task_$(printf '%03d' "$SEED")_{spec['algorithm_id']}_seed_$SEED"
 REMOTE={q(remote)}/workers/$TASK
 finish() {{
   code=$?
@@ -83,23 +92,23 @@ finish() {{
   exit "$code"
 }}
 trap finish EXIT
-python -m {MODULE}.train --seed "$SEED" --output-root "$OUT" --remote-uri "$REMOTE"
+python -m {module}.train --seed "$SEED" --output-root "$OUT" --remote-uri "$REMOTE"
 """
     if stage == "smoke":
         return text + f"""
 trap 'code=$?; gcloud storage rsync --recursive "$OUT" {q(remote + '/smoke')} || true; exit "$code"' EXIT
 python -m pip install -r requirements-dev.txt
-python -m pytest -q tests/test_exp2_sd_cfr_24h.py tests/test_single_solver.py tests/test_sd_cfr_efficiency.py
+python -m pytest -q {q(spec['test_file'])} tests/test_single_solver.py tests/test_sd_cfr_efficiency.py
 python -m experiments.fhp.exp1_sd_cfr_efficiency.run --seeds 0 1 2 --repeats 1 --output-dir "$OUT/equivalence"
-python -m {MODULE}.stress --output "$OUT/capacity_stress.json"
-python -m {MODULE}.train --seed 0 --smoke --output-root "$OUT/training"
-python -m {MODULE}.evaluate smoke --source "$OUT/training" --output "$OUT/evaluation" --workers 2
+python -m {module}.stress --output "$OUT/capacity_stress.json"
+python -m {module}.train --seed 0 --smoke --output-root "$OUT/training"
+python -m {module}.evaluate smoke --source "$OUT/training" --output "$OUT/evaluation" --workers 2
 gcloud storage rsync --recursive "$OUT" {q(remote + '/smoke')}
 """
     text += f"gcloud storage rsync --recursive {q(remote + '/workers')} \"$INPUT/sd/workers\"\n"
     if stage == "aggregate":
         return text + f"""
-python -m {MODULE}.report --source "$INPUT/sd" --output "$OUT/analysis"
+python -m {module}.report --source "$INPUT/sd" --output "$OUT/analysis"
 gcloud storage rsync --recursive "$OUT/analysis" {q(remote + '/analysis')}
 """
     text += f"""
@@ -122,7 +131,7 @@ finish() {{
 }}
 trap finish EXIT
 trap 'exit 143' TERM
-python -m {MODULE}.evaluate {'profile' if stage == 'profile' else 'run'} \
+python -m {module}.evaluate {'profile' if stage == 'profile' else 'run'} \
   --source "$INPUT/sd" \
   --output "$OUT/evaluation" --workers 8 --max-hours {args.eval_max_hours}
 """
@@ -146,7 +155,7 @@ def build_job(args, stage):
                 instances=[dict(policy=dict(machineType=machine, provisioningModel="STANDARD",
                 bootDisk=dict(sizeGb=disk, type="pd-balanced")))]),
                 logsPolicy=dict(destination="CLOUD_LOGGING"),
-                labels=dict(experiment="fhp-sdcfr-exp2-24h", stage=stage))
+                labels=dict(experiment=f"fhp-sdcfr-exp{settings(args)['number']}-24h", stage=stage))
 
 
 def cloud(args, *command, capture=False):
@@ -175,7 +184,7 @@ def wait(args, name):
         time.sleep(30)
 
 
-def main():
+def main(*, experiment=DEFAULT_EXPERIMENT):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("run", "orchestrate", "status", "dry-run", "evaluate-only"))
     for name, env, default in (("project", "PROJECT_ID", None), ("region", "REGION", None),
@@ -185,6 +194,7 @@ def main():
     parser.add_argument("--eval-max-hours", type=float, default=float(os.environ.get("EVAL_MAX_HOURS", "36")))
     parser.add_argument("--start-stage", choices=("smoke", "profile"), default="smoke")
     args = parser.parse_args()
+    args.experiment = experiment
     if not all((args.project, args.region, args.bucket, args.service_account, args.repo_ref, args.run_id)):
         parser.error("Set PROJECT_ID, REGION, BUCKET, SA_EMAIL, REPO_REF and RUN_ID")
     if not re.fullmatch(r"[a-z][a-z0-9-]{1,34}", args.run_id):

@@ -123,6 +123,10 @@ class DiskArchiveReader:
             raise ValueError("Unsupported SD-CFR checkpoint")
         if c["game_string"] != str(game):
             raise ValueError("SD-CFR checkpoint game mismatch")
+        from .fhp_features import encoder_from_metadata
+        self.feature_encoder = encoder_from_metadata(c.get("metadata", {}).get("feature_encoder"))
+        if c["embedding_size"] != len(self.information_state(game.new_initial_state(), 0)):
+            raise ValueError("SD-CFR archive input representation/dimensions mismatch")
         self.count = int(c["completed_iterations"])
         self.width = sum(row["size"] for row in c["layout"])
         self.chunks = c["chunks"]
@@ -144,6 +148,11 @@ class DiskArchiveReader:
                 raise ValueError("Archive array shape/precision mismatch")
         if expected != self.count + 1 or self.count < 1:
             raise ValueError("Incomplete historical strategy prefix")
+
+    def information_state(self, state, player):
+        if self.feature_encoder is not None:
+            return self.feature_encoder.information_state(state, player)
+        return state.information_state_tensor(player)
 
     def chunk(self, index):
         if index not in self._maps:
@@ -205,7 +214,7 @@ class DiskSampledPolicy:
         legal = state.legal_actions(player)
         if not legal:
             return {}
-        info = torch.tensor(state.information_state_tensor(player), dtype=torch.float32)
+        info = torch.tensor(self.reader.information_state(state, player), dtype=torch.float32)
         with torch.no_grad():
             raw = self.networks[player](info.unsqueeze(0))[0].numpy()
         probs = regret_matching_probabilities(raw, legal, self.reader.contract["num_actions"])
@@ -241,11 +250,11 @@ bounded, public information-state results, not full trees or opponent cards.
         features, masks, own_actions = [], [], []
         for action in state.history():
             if not cursor.is_chance_node() and cursor.current_player() == player:
-                features.append(cursor.information_state_tensor(player))
+                features.append(self.reader.information_state(cursor, player))
                 masks.append(cursor.legal_actions_mask(player))
                 own_actions.append(int(action))
             cursor.apply_action(action)
-        features.append(state.information_state_tensor(player))
+        features.append(self.reader.information_state(state, player))
         masks.append(state.legal_actions_mask(player))
         inputs = torch.tensor(np.asarray(features), dtype=torch.float32)
         mask = np.asarray(masks, dtype=np.float64)

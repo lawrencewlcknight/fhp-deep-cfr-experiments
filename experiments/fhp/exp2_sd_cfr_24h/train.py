@@ -19,7 +19,7 @@ from deep_cfr_poker.game import serialisable_game_definition
 from deep_cfr_poker.sd_cfr_disk import DiskSDCFRArchive, DiskArchiveReader, DiskSampledPolicy, sha256, write_json
 from deep_cfr_poker.sd_cfr_optimised import OptimisedSingleDeepCFRSolver
 from deep_cfr_poker.seeding import set_seed
-from .config import ALGORITHM_ID, EXPERIMENT_NAME, SEEDS, HOURS, SECONDS, REFERENCE_VM, solver_config, task_name
+from . import config as default_experiment
 
 
 class ActiveClock:
@@ -55,10 +55,11 @@ def write_csv(path, rows):
         writer.writerows(rows)
 
 
-def run_worker(output_root, seed, *, smoke=False, remote_uri=None):
-    if seed not in SEEDS or (smoke and seed != 0):
+def run_worker(output_root, seed, *, smoke=False, remote_uri=None,
+               experiment=default_experiment, solver_class=OptimisedSingleDeepCFRSolver):
+    if seed not in experiment.SEEDS or (smoke and seed != 0):
         raise ValueError("Unexpected seed")
-    root = Path(output_root) / "workers" / task_name(seed)
+    root = Path(output_root) / "workers" / experiment.task_name(seed)
     # Never pretend policy-only checkpoints can resume a training trajectory.
     if root.exists() and any(root.iterdir()):
         raise ValueError(f"Non-empty worker directory: {root}. Use a fresh run; no replay state is retained.")
@@ -66,16 +67,19 @@ def run_worker(output_root, seed, *, smoke=False, remote_uri=None):
     torch.set_num_threads(1)
     torch.set_num_interop_threads(1)
     set_seed(seed)
-    config = solver_config(smoke)
-    solver = OptimisedSingleDeepCFRSolver(pack_replay=True, **config)
+    config = experiment.solver_config(smoke)
+    solver = solver_class(pack_replay=True, **config)
     archive = DiskSDCFRArchive(solver, root / "archive", chunk_iterations=2 if smoke else 128)
     solver.archive = archive
-    schedule = (0.01, 0.02, 0.03, 0.04) if smoke else SECONDS
+    schedule = (0.01, 0.02, 0.03, 0.04) if smoke else experiment.SECONDS
+    hours = experiment.HOURS
     commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
-    manifest = dict(experiment_name=EXPERIMENT_NAME, algorithm_id=ALGORITHM_ID,
+    manifest = dict(experiment_name=experiment.EXPERIMENT_NAME, algorithm_id=experiment.ALGORITHM_ID,
                     seed=seed, smoke=smoke, config=config, game=serialisable_game_definition(),
-                    checkpoints_hours=list(HOURS), target_seconds=list(schedule),
-                    reference_vm=REFERENCE_VM, torch_threads=1, interop_threads=1,
+                    checkpoints_hours=list(hours), target_seconds=list(schedule),
+                    feature_encoder=archive.metadata.get("feature_encoder"),
+                    replay_encoding=solver._advantage_memories[0].feature_encoding,
+                    reference_vm=experiment.REFERENCE_VM, torch_threads=1, interop_threads=1,
                     torch_version=torch.__version__, numpy_version=np.__version__,
                     python_version=platform.python_version(), repository_commit=commit,
                     strategy_weighting="uniform", full_training_states_retained=False,
@@ -111,7 +115,7 @@ def run_worker(output_root, seed, *, smoke=False, remote_uri=None):
             return
         with clock.paused():
             for index in due:
-                path = archive.checkpoint(root / "archive" / f"time_{HOURS[index]:02d}h.json")
+                path = archive.checkpoint(root / "archive" / f"time_{hours[index]:02d}h.json")
                 reader = DiskArchiveReader(path, active_solver._game)
                 policy = DiskSampledPolicy(reader)
                 policy.begin_episode(seed=123456)
@@ -122,8 +126,8 @@ def run_worker(output_root, seed, *, smoke=False, remote_uri=None):
                 if not np.isclose(sum(probabilities.values()), 1.0):
                     raise RuntimeError("Reloaded policy invalid")
                 records.append(dict(seed=seed, checkpoint_index=index,
-                                    checkpoint_id=f"time_{HOURS[index]:02d}h",
-                                    checkpoint_target_hours=HOURS[index],
+                                    checkpoint_id=f"time_{hours[index]:02d}h",
+                                    checkpoint_target_hours=hours[index],
                                     checkpoint_target_seconds=schedule[index],
                                     actual_training_elapsed_seconds=active_seconds,
                                     wall_clock_seconds=time.perf_counter() - clock.started,
@@ -169,14 +173,15 @@ def run_worker(output_root, seed, *, smoke=False, remote_uri=None):
     return root
 
 
-def main():
+def main(*, experiment=default_experiment, solver_class=OptimisedSingleDeepCFRSolver):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-root", type=Path, required=True)
-    parser.add_argument("--seed", type=int, choices=SEEDS, required=True)
+    parser.add_argument("--seed", type=int, choices=experiment.SEEDS, required=True)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--remote-uri")
     args = parser.parse_args()
-    run_worker(args.output_root, args.seed, smoke=args.smoke, remote_uri=args.remote_uri)
+    run_worker(args.output_root, args.seed, smoke=args.smoke, remote_uri=args.remote_uri,
+               experiment=experiment, solver_class=solver_class)
 
 
 if __name__ == "__main__":

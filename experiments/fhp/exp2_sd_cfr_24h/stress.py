@@ -14,17 +14,22 @@ from deep_cfr_poker.seeding import set_seed
 from .config import solver_config
 
 
-def run(output, iterations=10000, capacity=5000000):
+def run(output, iterations=10000, capacity=5000000, *, solver_class=OptimisedSingleDeepCFRSolver):
     torch.set_num_threads(1)
     torch.set_num_interop_threads(1)
     set_seed(77)
     config = solver_config()
     config["memory_capacity"] = capacity
-    solver = OptimisedSingleDeepCFRSolver(**config)
+    solver = solver_class(**config)
     allocated = 0
     for memory in solver._advantage_memories:
+        # Fill with an actual encoded input, so structured fractions remain valid.
+        state = solver._game.new_initial_state()
+        while state.is_chance_node():
+            state.apply_action(state.chance_outcomes()[0][0])
+        packed = memory._pack(solver._information_state(state, state.current_player()))
         for array in (memory._info_states, memory._iterations, memory._targets):
-            array.fill(1)
+            array[...] = packed if array is memory._info_states else 1
             allocated += array.nbytes
         memory._size = capacity
         memory._add_calls = capacity
@@ -54,8 +59,12 @@ def run(output, iterations=10000, capacity=5000000):
                             * (1 if sys.platform == "darwin" else 1024)))
 
 
-if __name__ == "__main__":
+def main(*, solver_class=OptimisedSingleDeepCFRSolver):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    run(args.output)
+    run(args.output, solver_class=solver_class)
+
+
+if __name__ == "__main__":
+    main()
