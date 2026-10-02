@@ -118,6 +118,9 @@ trap finish EXIT
         if spec.get("parallel_smoke"):
             ray_check = (f"RUN_RAY_SD_CFR_TESTS=1 python -m pytest -q {q(spec['test_file'])} "
                          "tests/test_sd_cfr_parallel.py -k real_ray\n")
+        if spec.get("fitting_benchmark"):
+            ray_check += (f'python -m {module}.benchmark --output "$OUT/fitting_benchmark" '
+                          '--repeats 3\n')
         return text + f"""
 trap 'code=$?; gcloud storage rsync --recursive "$OUT" {q(remote + '/smoke')} || true; exit "$code"' EXIT
 python -m pip install -r requirements-dev.txt

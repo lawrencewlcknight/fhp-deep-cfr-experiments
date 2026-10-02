@@ -160,6 +160,15 @@ def run_worker(output_root, seed, *, smoke=False, remote_uri=None,
                        last_phase_collection_seconds=phase["seconds"],
                        last_phase_cache_hits=phase["inference_cache_hits"],
                        last_phase_cache_misses=phase["inference_cache_misses"])
+        fit_totals = getattr(active_solver, "distributed_fit_totals", None)
+        if fit_totals is not None:
+            row.update({f"fitting_total_{key}": value for key, value in fit_totals.items()})
+            fit = active_solver.last_distributed_fit
+            if fit is not None:
+                row.update(last_fit_seconds=fit["seconds"],
+                           last_fit_preparation_seconds=fit["preparation_seconds"],
+                           last_fit_mean_worker_compute_seconds=float(np.mean(fit["worker_compute_seconds"])),
+                           last_fit_mean_worker_communication_seconds=float(np.mean(fit["worker_communication_seconds"])))
         telemetry.append(row)
         if iteration % 25 == 0 or smoke:
             print(json.dumps(row), flush=True)

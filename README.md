@@ -28,6 +28,8 @@ Opt-in traversal parallelism is available through
 Both use Ray workers and one central learner, without fitting an average-policy
 network. See the [parallel solver instructions](docs/SD_CFR.md#parallel-traversal-solver).
 Experiments 2--4 use sequential solvers; Experiments 5--6 use parallel traversal.
+Experiment 7 additionally tests synchronous distributed fitting; it is opt-in,
+with numerical and timing preflight checks, not a replacement for Experiment 5.
 The former conventional Deep CFR Experiment 1 is archived; the active
 Experiment 1 is now the SD-CFR efficiency audit below, not a long-horizon
 training run. SD-CFR archives are not conventional policy snapshots
@@ -110,6 +112,20 @@ no intermediate replay dumps are retained. Explicit continuation uses a new run
 ID and preserves the original outputs.
 
 See [Experiment 6 configuration, retention and continuation instructions](experiments/fhp/exp6_sd_cfr_parallel_48h/README.md).
+
+## Experiment 7: eight-worker distributed fitting
+
+Experiment 5's 24-hour configuration is unchanged except that its eight actors
+now also perform synchronous advantage-network fitting. Global batch size,
+normalization, replay sampling, Adam state and output-policy weighting are
+preserved. Real-worker update tests and a full-budget frozen-fit benchmark gate
+long cloud training; faster fitting and near-identical long fits are not assumed.
+
+See [Experiment 7 configuration and validation gates](experiments/fhp/exp7_sd_cfr_distributed_fitting_24h/README.md).
+
+Start with the [standalone short fitting/throughput screen](experiments/fhp/exp7_sd_cfr_distributed_fitting_24h/SHORT_TEST.md):
+one n2-standard-16 VM, approximately 30 active minutes, small analysis outputs,
+and no automatic long-run submission.
 
 Fresh experiment repository for applying Deep Counterfactual Regret
 Minimisation (Deep CFR) to flop hold'em poker (FHP).

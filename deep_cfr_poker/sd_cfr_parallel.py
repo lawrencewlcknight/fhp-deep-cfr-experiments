@@ -234,6 +234,7 @@ class SDCFRTraversalWorker:
 
 class _ParallelSDCFR:
     _structured_workers = False
+    worker_class = SDCFRTraversalWorker
 
     def __init__(self, game=None, *, parallel_num_workers=3, parallel_run_seed=0,
                  parallel_backend="ray", parallel_chunk_rows=4096,
@@ -303,7 +304,7 @@ class _ParallelSDCFR:
         try:
             with isolated_rng():
                 if self._parallel_backend == "serial":
-                    self._workers = [SDCFRTraversalWorker(worker_index=i, **self._worker_kwargs)
+                    self._workers = [self.worker_class(worker_index=i, **self._worker_kwargs)
                                      for i in range(self.parallel_num_workers)]
                     return
                 import ray
@@ -319,7 +320,7 @@ class _ParallelSDCFR:
                     ray.init(**options)
                 actor = ray.remote(num_cpus=1, max_restarts=0, max_task_retries=0,
                                    runtime_env={"env_vars": {"OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
-                                                            "OPENBLAS_NUM_THREADS": "1"}})(SDCFRTraversalWorker)
+                                                            "OPENBLAS_NUM_THREADS": "1"}})(self.worker_class)
                 for index in range(self.parallel_num_workers):
                     self._workers.append(actor.remote(worker_index=index, configure_actor_threads=True,
                                                       **self._worker_kwargs))

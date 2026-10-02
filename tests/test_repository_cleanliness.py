@@ -31,7 +31,7 @@ def test_only_approved_experiment_and_no_outputs():
         for path in (ROOT / "experiments" / "fhp").iterdir()
         if path.name not in {"__init__.py", "__pycache__"}
     )
-    assert experiment_children == ["archive_exp1_deep_cfr_best_config_transfer", "exp1_sd_cfr_efficiency", "exp2_sd_cfr_24h", "exp3_sd_cfr_structured_24h", "exp4_sd_cfr_structured_n2_standard16", "exp5_sd_cfr_parallel_24h", "exp6_sd_cfr_parallel_48h"]
+    assert experiment_children == ["archive_exp1_deep_cfr_best_config_transfer", "exp1_sd_cfr_efficiency", "exp2_sd_cfr_24h", "exp3_sd_cfr_structured_24h", "exp4_sd_cfr_structured_n2_standard16", "exp5_sd_cfr_parallel_24h", "exp6_sd_cfr_parallel_48h", "exp7_sd_cfr_distributed_fitting_24h"]
 
     # Downloaded analytical outputs are legitimate ignored local data, not
     # source artefacts. Reject tracked/non-ignored outputs without requiring

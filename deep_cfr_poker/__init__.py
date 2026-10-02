@@ -13,6 +13,7 @@ from .solver import DeepCFRSolver, SolveResult
 from .sd_cfr import SDCFRArchive, SampledSDCFRPolicy
 from .single_solver import SELECTED_SD_CFR_KWARGS, SingleDeepCFRSolver
 from .sd_cfr_parallel import ParallelSingleDeepCFRSolver, ParallelStructuredSingleDeepCFRSolver
+from .sd_cfr_distributed import DistributedFittingSingleDeepCFRSolver
 
 __all__ = [
     "DeepCFRSolver",
@@ -20,6 +21,7 @@ __all__ = [
     "SingleDeepCFRSolver",
     "ParallelSingleDeepCFRSolver",
     "ParallelStructuredSingleDeepCFRSolver",
+    "DistributedFittingSingleDeepCFRSolver",
     "SELECTED_SD_CFR_KWARGS",
     "SDCFRArchive",
     "SampledSDCFRPolicy",

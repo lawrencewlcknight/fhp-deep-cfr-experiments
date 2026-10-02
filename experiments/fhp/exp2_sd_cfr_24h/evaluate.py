@@ -66,6 +66,15 @@ def checkpoint_index(root, *, smoke=False, experiment=default_experiment):
                         or execution.get("run_seed") != expected["parallel_run_seed"]
                         or execution != manifest.get("parallel_execution")):
                     raise ValueError("Checkpoint parallel execution metadata mismatch")
+                if expected.get("distributed_fitting"):
+                    fitting = execution.get("fitting", {})
+                    if (fitting.get("backend") != "gloo_synchronous_allreduce"
+                            or fitting.get("workers") != expected["parallel_num_workers"]
+                            or fitting.get("global_batch_size") != manifest["config"]["batch_size_advantage"]
+                            or fitting.get("updates_per_player") != manifest["config"]["advantage_network_train_steps"]
+                            or fitting.get("target_normalization") != "global_minibatch"
+                            or fitting.get("gradient_reduction") != "sum_example_weighted"):
+                        raise ValueError("Checkpoint distributed fitting metadata mismatch")
             records.append(dict(experiment=experiment.REPORT_ID,
                                 seed=int(manifest["seed"]), training_hours=int(row["checkpoint_target_hours"]),
                                 active_seconds=float(row["actual_training_elapsed_seconds"]),
