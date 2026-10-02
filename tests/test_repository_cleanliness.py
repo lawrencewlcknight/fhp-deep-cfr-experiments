@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,8 +31,13 @@ def test_only_approved_experiment_and_no_outputs():
         for path in (ROOT / "experiments" / "fhp").iterdir()
         if path.name not in {"__init__.py", "__pycache__"}
     )
-    assert experiment_children == ["archive_exp1_deep_cfr_best_config_transfer", "exp1_sd_cfr_efficiency", "exp2_sd_cfr_24h", "exp3_sd_cfr_structured_24h", "exp4_sd_cfr_structured_n2_standard16", "exp5_sd_cfr_parallel_24h"]
+    assert experiment_children == ["archive_exp1_deep_cfr_best_config_transfer", "exp1_sd_cfr_efficiency", "exp2_sd_cfr_24h", "exp3_sd_cfr_structured_24h", "exp4_sd_cfr_structured_n2_standard16", "exp5_sd_cfr_parallel_24h", "exp6_sd_cfr_parallel_48h"]
 
-    output_children = sorted(path.name for path in (ROOT / "outputs").iterdir())
-    assert output_children == [".gitkeep"]
-    assert not (ROOT / "cloud_outputs").exists()
+    # Downloaded analytical outputs are legitimate ignored local data, not
+    # source artefacts. Reject tracked/non-ignored outputs without requiring
+    # users to delete their completed experiment results to run the tests.
+    output_files = subprocess.run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "--", "outputs", "cloud_outputs"],
+        cwd=ROOT, text=True, capture_output=True, check=True,
+    ).stdout.splitlines()
+    assert output_files == ["outputs/.gitkeep"]

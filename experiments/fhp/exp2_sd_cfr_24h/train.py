@@ -1,4 +1,4 @@
-"""Continuous training, four durable policy prefixes, no full replay dumps."""
+"""Continuous training with durable policy prefixes and opt-in final resume state."""
 from __future__ import annotations
 
 import argparse
@@ -23,12 +23,16 @@ from . import config as default_experiment
 
 
 class ActiveClock:
-    def __init__(self, clock=time.perf_counter):
-        self.clock, self.excluded = clock, 0.0
+    def __init__(self, clock=time.perf_counter, *, active=0.0, elapsed=0.0):
+        self.clock, self.excluded = clock, elapsed - active
+        self.elapsed_offset = elapsed
         self.started = clock()
 
     def __call__(self):
-        return self.clock() - self.started - self.excluded
+        return self.elapsed() - self.excluded
+
+    def elapsed(self):
+        return self.elapsed_offset + self.clock() - self.started
 
     @contextmanager
     def paused(self):
@@ -41,7 +45,7 @@ class ActiveClock:
 
 def sync(root, uri):
     if uri:
-        subprocess.run(["gcloud", "storage", "rsync", "--recursive", "--exclude=\\.tmp$", str(root), uri], check=True)
+        subprocess.run(["gcloud", "storage", "rsync", "--recursive", "--exclude=.*[.]tmp$", str(root), uri], check=True)
 
 
 def write_csv(path, rows):
@@ -56,24 +60,54 @@ def write_csv(path, rows):
 
 
 def run_worker(output_root, seed, *, smoke=False, remote_uri=None,
-               experiment=default_experiment, solver_class=OptimisedSingleDeepCFRSolver):
+               experiment=default_experiment, solver_class=OptimisedSingleDeepCFRSolver,
+               resume_state=None, additional_hours=None):
     if seed not in experiment.SEEDS or (smoke and seed != 0):
         raise ValueError("Unexpected seed")
     root = Path(output_root) / "workers" / experiment.task_name(seed)
-    # Never pretend policy-only checkpoints can resume a training trajectory.
+    retain_state = getattr(experiment, "RETAIN_FINAL_TRAINING_STATE", False)
+    if (resume_state is None) != (additional_hours is None):
+        raise ValueError("Resume requires both --resume-state and --additional-hours")
+    if resume_state and (not retain_state or additional_hours not in range(6, 49, 6)):
+        raise ValueError("Only resumable experiments accept an additional 6..48 hours in six-hour steps")
+    # Policy-only checkpoints cannot resume a training trajectory. Full states
+    # are restored into a new output directory, never over the source run.
     if root.exists() and any(root.iterdir()):
-        raise ValueError(f"Non-empty worker directory: {root}. Use a fresh run; no replay state is retained.")
+        raise ValueError(f"Non-empty worker directory: {root}. Use a fresh output directory.")
     root.mkdir(parents=True, exist_ok=True)
     torch.set_num_threads(1)
-    torch.set_num_interop_threads(1)
+    if torch.get_num_interop_threads() != 1:
+        torch.set_num_interop_threads(1)
     set_seed(seed)
     config = experiment.solver_config(smoke)
     execution = (experiment.execution_config(seed) if hasattr(experiment, "execution_config") else {})
-    solver = solver_class(pack_replay=True, **config, **execution)
-    archive = DiskSDCFRArchive(solver, root / "archive", chunk_iterations=2 if smoke else 128)
-    solver.archive = archive
-    schedule = (0.01, 0.02, 0.03, 0.04) if smoke else experiment.SECONDS
-    hours = experiment.HOURS
+    previous = {}
+    continuation = None
+    hours = list(experiment.HOURS)
+    if resume_state:
+        from deep_cfr_poker.sd_cfr_training_state import inspect_training_state, load_training_state
+        saved = inspect_training_state(resume_state, expected_config=config, expected_execution=execution)
+        if saved["seed"] != seed or saved["smoke"] != smoke:
+            raise ValueError("Resume seed/smoke mode differs from the saved run")
+        previous_hours = saved["hours"]
+        hours = list(range(6, previous_hours[-1] + additional_hours + 1, 6))
+        if previous_hours != hours[:len(previous_hours)] or previous_hours[:len(experiment.HOURS)] != list(experiment.HOURS):
+            raise ValueError("Resume checkpoint schedule differs from the experiment")
+        continuation = dict(source_state_sha256=sha256(resume_state), source_hours=previous_hours,
+                            additional_hours=additional_hours)
+        solver, previous = load_training_state(resume_state, root / "archive", expected_config=config,
+                                              expected_execution=execution, solver_class=solver_class)
+        archive = solver.archive
+    else:
+        solver = solver_class(pack_replay=True, **config, **execution)
+        archive = DiskSDCFRArchive(solver, root / "archive", chunk_iterations=2 if smoke else 128)
+        solver.archive = archive
+    schedule = [0.01 * (index + 1) for index in range(len(hours))] if smoke else [h * 3600 for h in hours]
+    # Smoke continuation needs a fresh tiny budget even if the first real
+    # iteration greatly overshot its artificial thresholds.
+    if resume_state and smoke:
+        schedule = [r["checkpoint_target_seconds"] for r in previous["records"]] + [
+            previous["active_seconds"] + 0.01 * (i + 1) for i in range(additional_hours // 6)]
     commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
     manifest = dict(experiment_name=experiment.EXPERIMENT_NAME, algorithm_id=experiment.ALGORITHM_ID,
                     seed=seed, smoke=smoke, config=config, game=serialisable_game_definition(),
@@ -83,20 +117,25 @@ def run_worker(output_root, seed, *, smoke=False, remote_uri=None,
                     reference_vm=experiment.REFERENCE_VM, torch_threads=1, interop_threads=1,
                     torch_version=torch.__version__, numpy_version=np.__version__,
                     python_version=platform.python_version(), repository_commit=commit,
-                    strategy_weighting="uniform", full_training_states_retained=False,
+                    strategy_weighting="uniform", full_training_states_retained=retain_state,
                     checkpoint_boundary="first_completed_outer_iteration_crossing_threshold",
                     time_excludes="checkpoint_serialization_reload_validation_and_upload",
                     archive_capture_included_in_training_time=True,
                     node_definition="calls_to_external_sampling_traversal_including_terminal_states",
                     exact_exploitability=False)
+    if continuation:
+        manifest["continuation"] = continuation
     if execution:
         manifest.update(execution=execution, parallel_execution=archive.metadata["parallel_execution"],
                         parallel_startup_included_in_training_time=True,
                         peak_rss_scope="central_learner_only_excludes_ray_and_actors")
     write_json(root / "run_manifest.json", manifest)
-    records, telemetry = [], []
-    clock = ActiveClock()
-    completed_iteration_seconds = 0.0
+    records, telemetry = previous.get("records", []), previous.get("telemetry", [])
+    clock = ActiveClock(active=previous.get("active_seconds", 0.0),
+                        elapsed=previous.get("elapsed_seconds", 0.0))
+    completed_iteration_seconds = previous.get("active_seconds", 0.0)
+    remaining_seconds = schedule[-1] - completed_iteration_seconds
+    first_iteration = solver._iteration
 
     def observe(active_solver, iteration):
         nonlocal completed_iteration_seconds
@@ -104,7 +143,7 @@ def run_worker(output_root, seed, *, smoke=False, remote_uri=None,
         completed_iteration_seconds = active_seconds
         usage = resource.getrusage(resource.RUSAGE_SELF)
         row = dict(seed=seed, iteration=iteration, active_seconds=active_seconds,
-                   elapsed_seconds=time.perf_counter() - clock.started,
+                   elapsed_seconds=clock.elapsed(),
                    nodes_touched=active_solver._nodes_touched,
                    replay_rows_p0=len(active_solver._advantage_memories[0]),
                    replay_rows_p1=len(active_solver._advantage_memories[1]),
@@ -124,7 +163,7 @@ def run_worker(output_root, seed, *, smoke=False, remote_uri=None,
         telemetry.append(row)
         if iteration % 25 == 0 or smoke:
             print(json.dumps(row), flush=True)
-        due = [index for index in range(len(records), 4) if active_seconds >= schedule[index]]
+        due = [index for index in range(len(records), len(hours)) if active_seconds >= schedule[index]]
         if not due:
             return
         with clock.paused():
@@ -144,7 +183,7 @@ def run_worker(output_root, seed, *, smoke=False, remote_uri=None,
                                     checkpoint_target_hours=hours[index],
                                     checkpoint_target_seconds=schedule[index],
                                     actual_training_elapsed_seconds=active_seconds,
-                                    wall_clock_seconds=time.perf_counter() - clock.started,
+                                    wall_clock_seconds=clock.elapsed(),
                                     outer_iteration=iteration, nodes_touched=active_solver._nodes_touched,
                                     path=str(path.relative_to(root)), sha256=sha256(path),
                                     archive_bytes=sum(c["size_bytes"] for c in archive.chunks)))
@@ -154,32 +193,51 @@ def run_worker(output_root, seed, *, smoke=False, remote_uri=None,
             sync(root, remote_uri)
 
     try:
+        if remaining_seconds <= 0:
+            raise ValueError("Saved training already exceeds the requested continuation endpoint")
         result = solver.solve(post_iteration_callback=observe,
-                              max_training_seconds=schedule[-1],
+                              max_training_seconds=remaining_seconds,
                               # Stop and checkpoint must use the SAME boundary
                               # observation: logging could cross the deadline
                               # after the callback checked it, otherwise ending
                               # the run without its final playable checkpoint.
                               training_clock=lambda: completed_iteration_seconds)
-        if len(records) != 4:
+        if len(records) != len(hours):
             raise RuntimeError("Iteration safety cap reached before all time checkpoints; run is incomplete")
         write_csv(root / "training_trajectory.csv", telemetry)
         # Per-iteration regression losses and standard solver diagnostics.
-        loss_rows = [dict(iteration=index + 1, player=player,
+        loss_rows = previous.get("loss_rows", []) + [dict(iteration=index + first_iteration, player=player,
                          advantage_loss=float(value) if np.isfinite(value) else None)
                      for player, values in result.advantage_losses.items()
                      for index, value in enumerate(values)]
         write_csv(root / "advantage_losses.csv", loss_rows)
-        diagnostics = [dict(checkpoint_index=i, **{key: (None if isinstance(values[i], float)
+        prior_diagnostics = previous.get("diagnostics", [])
+        diagnostics = prior_diagnostics + [dict(checkpoint_index=i + len(prior_diagnostics), **{key: (None if isinstance(values[i], float)
                         and not np.isfinite(values[i]) else values[i])
                         for key, values in result.diagnostics.items()})
                        for i in range(len(result.diagnostics["iteration"]))]
+        for row in diagnostics[len(prior_diagnostics):]:
+            row["wall_clock_seconds"] += previous.get("elapsed_seconds", 0.0)
         write_csv(root / "solver_diagnostics.csv", diagnostics)
-        write_json(root / "SUCCESS.json", dict(seed=seed, checkpoints=4,
-                    active_seconds=clock(), elapsed_seconds=time.perf_counter() - clock.started,
+        state_metadata = {}
+        if retain_state:
+            from deep_cfr_poker.sd_cfr_training_state import save_training_state
+            # Save AFTER final diagnostics: these can sample replay and advance
+            # the learner RNG. Snapshot/validation I/O is not active training.
+            context = dict(seed=seed, smoke=smoke, hours=hours, records=records, telemetry=telemetry,
+                           loss_rows=loss_rows, diagnostics=diagnostics,
+                           active_seconds=clock(), elapsed_seconds=clock.elapsed())
+            with clock.paused():
+                state_path = save_training_state(solver, root, root / records[-1]["path"],
+                                                 config=config, execution=execution, context=context)
+                state_metadata = dict(training_state_path=str(state_path.relative_to(root)),
+                                      training_state_sha256=sha256(state_path),
+                                      training_state_bytes=sum(p.stat().st_size for p in state_path.parent.iterdir()))
+        write_json(root / "SUCCESS.json", dict(seed=seed, checkpoints=len(hours),
+                    active_seconds=clock(), elapsed_seconds=clock.elapsed(),
                     checkpoint_overhead_seconds=clock.excluded,
                     final_nodes=solver._nodes_touched, completed_iterations=archive.count,
-                    full_training_states_retained=False))
+                    full_training_states_retained=retain_state, **state_metadata))
         sync(root, remote_uri)
     except Exception as error:
         write_json(root / "FAILURE.json", dict(error=repr(error), active_seconds=clock()))
@@ -197,9 +255,12 @@ def main(*, experiment=default_experiment, solver_class=OptimisedSingleDeepCFRSo
     parser.add_argument("--seed", type=int, choices=experiment.SEEDS, required=True)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--remote-uri")
+    parser.add_argument("--resume-state", type=Path, help="Trusted final training_state/manifest.json; requires its adjacent archive")
+    parser.add_argument("--additional-hours", type=int, help="Extra active hours after the source nominal endpoint (6..48, step 6)")
     args = parser.parse_args()
     run_worker(args.output_root, args.seed, smoke=args.smoke, remote_uri=args.remote_uri,
-               experiment=experiment, solver_class=solver_class)
+               experiment=experiment, solver_class=solver_class,
+               resume_state=args.resume_state, additional_hours=args.additional_hours)
 
 
 if __name__ == "__main__":

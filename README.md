@@ -27,7 +27,7 @@ Opt-in traversal parallelism is available through
 `ParallelStructuredSingleDeepCFRSolver` (Experiment 3/4 structured inputs).
 Both use Ray workers and one central learner, without fitting an average-policy
 network. See the [parallel solver instructions](docs/SD_CFR.md#parallel-traversal-solver).
-Existing numbered experiments still use their sequential solvers.
+Experiments 2--4 use sequential solvers; Experiments 5--6 use parallel traversal.
 The former conventional Deep CFR Experiment 1 is archived; the active
 Experiment 1 is now the SD-CFR efficiency audit below, not a long-horizon
 training run. SD-CFR archives are not conventional policy snapshots
@@ -98,6 +98,18 @@ sequential and parallel arms; their random streams differ, so identical
 trajectories are not expected. No cloud run is launched automatically.
 
 See [Experiment 5 specification and launch instructions](experiments/fhp/exp5_sd_cfr_parallel_24h/README.md).
+
+## Experiment 6: 48 hours with resumable final state
+
+Experiment 5's learner, three seeds, eight workers and `n2-standard-16` VMs
+are unchanged. The active budget is extended to 48 hours, with playable policy
+checkpoints every six hours and the same standalone evaluation protocol.
+One final resumable state per seed additionally preserves packed replay, Adam,
+random streams and counters alongside the full historical strategy archive;
+no intermediate replay dumps are retained. Explicit continuation uses a new run
+ID and preserves the original outputs.
+
+See [Experiment 6 configuration, retention and continuation instructions](experiments/fhp/exp6_sd_cfr_parallel_48h/README.md).
 
 Fresh experiment repository for applying Deep Counterfactual Regret
 Minimisation (Deep CFR) to flop hold'em poker (FHP).

@@ -21,13 +21,14 @@ from fhp_evaluation.duplicate import evaluate_duplicate_match
 from fhp_evaluation.lbr import LBRConfig, LocalBestResponsePolicy
 from fhp_evaluation.rule_agents import PUBLISHED_AGENT_NAMES, published_rule_agents
 from . import config as default_experiment
-from .config import (SEEDS, HOURS, BASE_SEED, RULE_DEALS,
+from .config import (BASE_SEED, RULE_DEALS,
                      LBR_DEALS, LBR_ROLLOUTS, LBR_SHARD_DEALS, CROSSPLAY_DEALS)
 from .train import write_csv
 
 
 def checkpoint_index(root, *, smoke=False, experiment=default_experiment):
     records = []
+    hours = None
     game = load_fhp_game()
     for manifest_path in sorted(Path(root).glob("workers/*/run_manifest.json")):
         manifest = json.loads(manifest_path.read_text())
@@ -43,7 +44,12 @@ def checkpoint_index(root, *, smoke=False, experiment=default_experiment):
         if not (worker / "SUCCESS.json").is_file() or (worker / "FAILURE.json").exists():
             raise ValueError("Incomplete training worker")
         rows = json.loads((worker / "checkpoint_manifest.json").read_text())
-        if sorted(float(row["checkpoint_target_hours"]) for row in rows) != list(HOURS):
+        worker_hours = (experiment.checkpoint_hours(manifest) if hasattr(experiment, "checkpoint_hours")
+                        else experiment.HOURS)
+        if hours is not None and hours != worker_hours:
+            raise ValueError("Training workers have different checkpoint schedules")
+        hours = worker_hours
+        if sorted(float(row["checkpoint_target_hours"]) for row in rows) != list(hours):
             raise ValueError("Incomplete/duplicate checkpoint schedule")
         for row in rows:
             path = (worker / row["path"]).resolve()
@@ -65,17 +71,18 @@ def checkpoint_index(root, *, smoke=False, experiment=default_experiment):
                                 active_seconds=float(row["actual_training_elapsed_seconds"]),
                                 nodes_touched=int(row["nodes_touched"]), path=str(path),
                                 sha256=row["sha256"], outer_iteration=int(row["outer_iteration"])))
-    expected_seeds = (0,) if smoke else SEEDS
-    if sorted((r["seed"], r["training_hours"]) for r in records) != list(itertools.product(expected_seeds, HOURS)):
-        raise ValueError(f"Expected exactly seeds {expected_seeds} at all four checkpoints")
+    expected_seeds = (0,) if smoke else experiment.SEEDS
+    if hours is None or sorted((r["seed"], r["training_hours"]) for r in records) != list(itertools.product(expected_seeds, hours)):
+        raise ValueError(f"Expected exactly seeds {expected_seeds} at all checkpoints")
     return records
 
 
 def make_tasks(records, *, smoke=False):
     tasks = []
     by_key = {(r["seed"], r["training_hours"]): r for r in records}
-    seeds = (0,) if smoke else SEEDS
-    hours = (6, 24) if smoke else HOURS
+    seeds = (0,) if smoke else sorted({r["seed"] for r in records})
+    all_hours = sorted({r["training_hours"] for r in records})
+    hours = (all_hours[0], all_hours[-1]) if smoke else all_hours
     for seed in seeds:
         for hour in hours:
             row = by_key[seed, hour]
@@ -204,7 +211,8 @@ def profile(tasks, output, *, workers, max_hours):
     # Worst observed full-archive checkpoint across every training seed.
     probes = []
     for kind in ("rule", "lbr", "temporal"):
-        candidates = [t for t in tasks if t["kind"] == kind and t["training_hours"] == 24]
+        candidates = [t for t in tasks if t["kind"] == kind
+                      and t["training_hours"] == max(t["training_hours"] for t in tasks)]
         for seed in sorted({t["training_seed"] for t in candidates}):
             selected = [t for t in candidates if t["training_seed"] == seed]
             # Different rule agents induce substantially different hand lengths.
@@ -255,7 +263,7 @@ def main(*, experiment=default_experiment):
                     experiment_name=experiment.EXPERIMENT_NAME,
                     algorithm_id=experiment.ALGORITHM_ID,
                     feature_encoder=experiment.FEATURE_ENCODER_METADATA,
-                    seeds=sorted({r["seed"] for r in sd}), hours=list(HOURS),
+                    seeds=sorted({r["seed"] for r in sd}), hours=sorted({r["training_hours"] for r in sd}),
                     evaluated_hours=sorted({task["training_hours"] for task in tasks}),
                     evaluation_scope="standalone_sd_cfr",
                     task_fingerprint=task_fingerprint(tasks), tasks=len(tasks),

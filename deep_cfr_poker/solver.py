@@ -608,7 +608,7 @@ class DeepCFRSolver(policy.Policy):
                 train_now = (((it + 1) % self._policy_network_train_every) == 0) or (
                     it == self._num_iterations - 1
                 )
-            evaluate_now = (((it + 1) % self._evaluation_interval) == 0) or (
+            evaluate_now = (((self._iteration - 1) % self._evaluation_interval) == 0) or (
                 it == self._num_iterations - 1
             )
 
@@ -688,7 +688,7 @@ class DeepCFRSolver(policy.Policy):
                 }
             target_diag = self._advantage_target_summary()
 
-            diagnostics["iteration"].append(int(it + 1))
+            diagnostics["iteration"].append(int(self._iteration - 1))
             diagnostics["wall_clock_seconds"].append(
                 float(time.perf_counter() - start_time)
             )

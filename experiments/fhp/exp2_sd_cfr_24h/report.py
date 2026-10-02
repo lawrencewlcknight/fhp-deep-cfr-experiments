@@ -95,6 +95,9 @@ def evaluation_report(results, sd, output, *, smoke=False):
     axis.axhline(0, color="gray", linestyle="--")
     axis.set(xticks=range(len(pairs)), xticklabels=[f"{l}h vs {e}h" for e, l in pairs],
              ylabel="mbb/hand; mean ± one training-seed SE", title="Later versus earlier SD-CFR policies")
+    if len(pairs) > 6:
+        fig.set_size_inches(max(10, len(pairs) * 0.42), 5)
+        axis.tick_params(axis="x", labelrotation=60, labelsize=8)
     if smoke:
         fig.suptitle("SMOKE TEST — short budgets, nominal checkpoint labels only")
     fig.tight_layout()
@@ -147,7 +150,7 @@ def training_report(source, output, *, experiment=default_experiment):
     fig.tight_layout()
     fig.savefig(output / "training_throughput.png", dpi=180)
     plt.close(fig)
-    write_json(output / "training_summary.json", dict(status="complete", seeds=3, checkpoints=12,
+    write_json(output / "training_summary.json", dict(status="complete", seeds=len({r["seed"] for r in rows}), checkpoints=len(rows),
                                                       exact_exploitability=False))
 
 

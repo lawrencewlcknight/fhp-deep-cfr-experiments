@@ -30,9 +30,12 @@ def q(value):
 
 
 def environment(args):
-    return dict(PROJECT_ID=args.project, REGION=args.region, BUCKET=args.bucket,
+    result = dict(PROJECT_ID=args.project, REGION=args.region, BUCKET=args.bucket,
                 SA_EMAIL=args.service_account, REPO_REF=args.repo_ref, RUN_ID=args.run_id,
                 EVAL_MAX_HOURS=str(args.eval_max_hours), PARALLELISM="3")
+    if getattr(args, "resume_run_id", None):
+        result.update(RESUME_RUN_ID=args.resume_run_id, ADDITIONAL_HOURS=str(args.additional_hours))
+    return result
 
 
 def bootstrap(args, *, controller=False):
@@ -52,12 +55,20 @@ git checkout --detach {q(args.repo_ref)}
 """
     if controller:
         return setup
-    return setup + """
+    python_version = 'TARGET_PYTHON_VERSION="3.11"\n'
+    if getattr(args, "resume_run_id", None):
+        # A later 3.11 patch release must not silently change the saved runtime.
+        task = f"task_000_{settings(args)['algorithm_id']}_seed_0"
+        source = f"{args.bucket}/{args.resume_run_id}/workers/{task}/training_state/manifest.json"
+        code = ('import json,re,sys; v=json.load(sys.stdin)["runtime"]["python"]; '
+                'assert re.fullmatch(r"3[.]11[.][0-9]+", v), "Unsupported saved Python version"; print(v)')
+        python_version = f'TARGET_PYTHON_VERSION="$(gcloud storage cat {q(source)} | python3 -c {q(code)})"\n'
+    return setup + python_version + """
 export UV_CACHE_DIR=/tmp/uv-cache UV_PYTHON_INSTALL_DIR=/tmp/uv-python
 curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/tmp/uv-bin UV_NO_MODIFY_PATH=1 sh
 export PATH="/tmp/uv-bin:$PATH"
-uv python install 3.11
-uv venv --python 3.11 --seed /tmp/fhp-sdcfr-exp2-venv
+uv python install "$TARGET_PYTHON_VERSION"
+uv venv --python "$TARGET_PYTHON_VERSION" --seed /tmp/fhp-sdcfr-exp2-venv
 source /tmp/fhp-sdcfr-exp2-venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install --no-cache-dir --no-build-isolation -r requirements.txt
@@ -79,6 +90,12 @@ def script(args, stage):
             f"exec python3 {q(spec['batch_script'])} orchestrate --start-stage {q(args.start_stage)}\n")
     text = bootstrap(args) + env + "\n"
     if stage == "train":
+        resume = ""
+        resume_flags = ""
+        if getattr(args, "resume_run_id", None):
+            resume = (f'gcloud storage rsync --recursive {q(args.bucket + "/" + args.resume_run_id + "/workers")}/"$TASK" "$INPUT/resume"\n')
+            resume_flags = (' --resume-state "$INPUT/resume/training_state/manifest.json"'
+                            f' --additional-hours {int(args.additional_hours)}')
         return text + f"""
 SEED="${{BATCH_TASK_INDEX:?Missing Batch task index}}"
 case "$SEED" in 0|1|2) ;; *) exit 2 ;; esac
@@ -87,12 +104,12 @@ REMOTE={q(remote)}/workers/$TASK
 finish() {{
   code=$?
   if [[ -d "$OUT/workers/$TASK" ]]; then
-    gcloud storage rsync --recursive --exclude='\\.tmp$' "$OUT/workers/$TASK" "$REMOTE" || {{ if [[ "$code" == 0 ]]; then code=1; fi; }}
+    gcloud storage rsync --recursive --exclude='.*[.]tmp$' "$OUT/workers/$TASK" "$REMOTE" || {{ if [[ "$code" == 0 ]]; then code=1; fi; }}
   fi
   exit "$code"
 }}
 trap finish EXIT
-python -m {module}.train --seed "$SEED" --output-root "$OUT" --remote-uri "$REMOTE"
+{resume}python -m {module}.train --seed "$SEED" --output-root "$OUT" --remote-uri "$REMOTE"{resume_flags}
 """
     if stage == "smoke":
         test_files = " ".join(q(path) for path in
@@ -112,7 +129,8 @@ python -m {module}.train --seed 0 --smoke --output-root "$OUT/training"
 python -m {module}.evaluate smoke --source "$OUT/training" --output "$OUT/evaluation" --workers 2
 gcloud storage rsync --recursive "$OUT" {q(remote + '/smoke')}
 """
-    text += f"gcloud storage rsync --recursive {q(remote + '/workers')} \"$INPUT/sd/workers\"\n"
+    exclusions = " --exclude='(^|.*/)training_state/.*|.*[.]tmp$'" if spec.get("final_training_state") else ""
+    text += f"gcloud storage rsync --recursive{exclusions} {q(remote + '/workers')} \"$INPUT/sd/workers\"\n"
     if stage == "aggregate":
         return text + f"""
 python -m {module}.report --source "$INPUT/sd" --output "$OUT/analysis"
@@ -159,6 +177,8 @@ def build_job(args, stage):
             memory = resources.get("memory_mib", memory)
         seconds = {"train": 129600, "smoke": 7200, "aggregate": 14400,
                    "profile": 14400, "evaluate": int((args.eval_max_hours + 2) * 3600)}[stage]
+        if stage == "train":
+            seconds = settings(args).get("train_max_seconds", seconds)
     count = 3 if stage == "train" else 1
     return dict(taskGroups=[dict(taskSpec=dict(runnables=[dict(script=dict(text=script(args, stage)))],
                 computeResource=dict(cpuMilli=cpu, memoryMib=memory), maxRetryCount=0,
@@ -167,7 +187,7 @@ def build_job(args, stage):
                 instances=[dict(policy=dict(machineType=machine, provisioningModel="STANDARD",
                 bootDisk=dict(sizeGb=disk, type="pd-balanced")))]),
                 logsPolicy=dict(destination="CLOUD_LOGGING"),
-                labels=dict(experiment=f"fhp-sdcfr-exp{settings(args)['number']}-24h", stage=stage))
+                labels=dict(experiment=f"fhp-sdcfr-exp{settings(args)['number']}-{settings(args).get('hours', 24)}h", stage=stage))
 
 
 def cloud(args, *command, capture=False):
@@ -205,6 +225,8 @@ def main(*, experiment=DEFAULT_EXPERIMENT):
         parser.add_argument("--" + name, default=os.environ.get(env, default))
     parser.add_argument("--eval-max-hours", type=float, default=float(os.environ.get("EVAL_MAX_HOURS", "36")))
     parser.add_argument("--start-stage", choices=("smoke", "profile"), default="smoke")
+    parser.add_argument("--resume-run-id", default=os.environ.get("RESUME_RUN_ID") if experiment.get("final_training_state") else None)
+    parser.add_argument("--additional-hours", type=int, default=int(os.environ.get("ADDITIONAL_HOURS", "24")))
     args = parser.parse_args()
     args.experiment = experiment
     if not all((args.project, args.region, args.bucket, args.service_account, args.repo_ref, args.run_id)):
@@ -215,6 +237,11 @@ def main(*, experiment=DEFAULT_EXPERIMENT):
         parser.error("REPO_REF must be the full pushed commit SHA")
     if not 0 < args.eval_max_hours <= 96:
         parser.error("EVAL_MAX_HOURS must be in (0, 96]")
+    if args.resume_run_id:
+        if (not experiment.get("final_training_state")
+                or not re.fullmatch(r"[a-z][a-z0-9-]{1,34}", args.resume_run_id)
+                or args.resume_run_id == args.run_id or args.additional_hours not in range(6, 49, 6)):
+            parser.error("Resume needs a supported experiment, distinct source/new RUN_IDs, and ADDITIONAL_HOURS=6..48 in steps of 6")
     args.bucket = args.bucket.rstrip("/")
     if not args.bucket.startswith("gs://"):
         args.bucket = "gs://" + args.bucket
@@ -229,6 +256,10 @@ def main(*, experiment=DEFAULT_EXPERIMENT):
         return
     if args.action in ("run", "evaluate-only"):
         cloud(args, "iam", "service-accounts", "describe", args.service_account)
+        if args.resume_run_id and args.action == "run":
+            for seed in range(3):
+                task = f"task_{seed:03d}_{experiment['algorithm_id']}_seed_{seed}"
+                cloud(args, "storage", "ls", f"{args.bucket}/{args.resume_run_id}/workers/{task}/training_state/manifest.json")
         tag = "-" + time.strftime("%H%M%S", time.gmtime()) if args.action == "evaluate-only" else ""
         name = submit(args, "controller", retry_tag=tag)
         print(f"Submitted {name}; the laptop may disconnect. Outputs: {args.bucket}/{args.run_id}")
