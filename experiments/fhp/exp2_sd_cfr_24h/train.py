@@ -123,6 +123,8 @@ def run_worker(output_root, seed, *, smoke=False, remote_uri=None,
                     archive_capture_included_in_training_time=True,
                     node_definition="calls_to_external_sampling_traversal_including_terminal_states",
                     exact_exploitability=False)
+    if hasattr(experiment, "EXPERIMENT_METADATA"):
+        manifest["experiment_metadata"] = experiment.EXPERIMENT_METADATA
     if continuation:
         manifest["continuation"] = continuation
     if execution:

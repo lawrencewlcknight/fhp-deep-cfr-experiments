@@ -1,6 +1,6 @@
-"""Unchanged rule-agent, LBR and temporal head-to-head evaluation."""
+"""Routine evaluation plus all-seed same-budget play against saved Experiment 5."""
 from experiments.fhp.exp2_sd_cfr_24h.evaluate import main
-from . import config
+from . import config, comparison
 
 if __name__ == "__main__":
-    main(experiment=config)
+    main(experiment=config, comparison=comparison)

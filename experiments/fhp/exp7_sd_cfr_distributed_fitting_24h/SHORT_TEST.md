@@ -35,8 +35,11 @@ timings are not independent training seeds.
 
 Non-finite values, incorrect single-step gradients/Adam updates, different
 sampling RNG streams, mutated frozen replay, failed worker synchronization or
-invalid archive capture fail the test. The existing 24-hour experiment's
-strict full-fit near-output gate remains unchanged.
+invalid archive capture fail the test. The standalone benchmark still defaults
+to a strict full-fit near-output gate. Following review of the completed cloud
+screen, the separately approved [24-hour comparison](README.md) explicitly allows
+accumulated drift while retaining all single-update correctness gates. This short
+screen itself does not launch or automatically approve that follow-up.
 
 Full 200-update parameter/logit/action-probability differences are recorded,
 but do not abort this diagnostic. They can amplify despite correct individual

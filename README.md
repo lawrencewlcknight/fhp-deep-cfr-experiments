@@ -118,14 +118,18 @@ See [Experiment 6 configuration, retention and continuation instructions](experi
 Experiment 5's 24-hour configuration is unchanged except that its eight actors
 now also perform synchronous advantage-network fitting. Global batch size,
 normalization, replay sampling, Adam state and output-policy weighting are
-preserved. Real-worker update tests and a full-budget frozen-fit benchmark gate
-long cloud training; faster fitting and near-identical long fits are not assumed.
+preserved. Strict real-worker gradient/Adam checks gate long cloud training.
+Accumulated full-fit drift is explicitly reported, not reclassified as equivalence.
+The approved 24-hour follow-up uses three seeds on separate n2-standard-16 VMs,
+compares saved Experiment 5 policies head-to-head at 6/12/18/24 hours, and retains
+rule-agent/temporal evaluation without routine LBR. No baseline retraining is needed.
 
 See [Experiment 7 configuration and validation gates](experiments/fhp/exp7_sd_cfr_distributed_fitting_24h/README.md).
 
-Start with the [standalone short fitting/throughput screen](experiments/fhp/exp7_sd_cfr_distributed_fitting_24h/SHORT_TEST.md):
-one n2-standard-16 VM, approximately 30 active minutes, small analysis outputs,
-and no automatic long-run submission.
+The [completed short fitting/throughput screen](experiments/fhp/exp7_sd_cfr_distributed_fitting_24h/SHORT_TEST.md)
+provided modest early-loop speed gains, not evidence of long-horizon quality.
+It remains available as a standalone one-VM engineering test with no automatic
+long-run submission.
 
 Fresh experiment repository for applying Deep Counterfactual Regret
 Minimisation (Deep CFR) to flop hold'em poker (FHP).

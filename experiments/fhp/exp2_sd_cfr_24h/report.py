@@ -25,7 +25,7 @@ def summary(values):
                 ci95_high=mean + margin if margin is not None else None)
 
 
-def evaluation_report(results, sd, output, *, smoke=False, include_lbr=True):
+def evaluation_report(results, sd, output, *, smoke=False, include_lbr=True, has_comparison=False):
     output = Path(output)
     experiment_ids = {row["experiment"] for row in sd}
     if len(experiment_ids) != 1:
@@ -132,8 +132,10 @@ def evaluation_report(results, sd, output, *, smoke=False, include_lbr=True):
     lbr_note = ("LBR is a sampled lower-bound diagnostic, not exact exploitability or a convergence certificate.\n"
                 if include_lbr else
                 "LBR was deliberately omitted; no exploitability or exploiter estimate is reported.\n")
+    scope = ("Routine evaluation tables; see exp7_vs_exp5_* and comparison_interpretation.txt for the fitting comparison.\n"
+             if has_comparison else "Standalone SD-CFR evaluation; no cross-algorithm comparisons are included.\n")
     (output / "interpretation.txt").write_text(
-        "Standalone SD-CFR evaluation; no cross-algorithm comparisons are included.\n"
+        scope +
         "Error bars use independent training seeds, not hands; temporal matchups are paired within seed.\n"
         + lbr_note +
         "Rule-agent and temporal results measure playing strength against those opponents, not Nash convergence.\n"

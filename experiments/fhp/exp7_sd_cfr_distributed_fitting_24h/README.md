@@ -1,149 +1,145 @@
-# Experiment 7: synchronous distributed fitting, 24 hours
+# Experiment 7: 24-hour distributed-fitting quality/efficiency comparison
 
-Experiment 5 is the unchanged control. Experiment 7 reuses its eight local Ray
-actors for both traversal and advantage-network fitting. This is an
-**experimental execution backend, not a demonstrated speed improvement**.
+This is the approved long follow-up to the [short engineering screen](SHORT_TEST.md).
+Experiment 5 is the saved control: `sdcfr5-par8-20261002-102757` by default.
+It is **not retrained**. Experiment 7 uses eight local Ray actors for both
+traversal and synchronous advantage-network fitting. This is an experimental
+backend, **not a near-identical-output replacement or proven quality gain**.
 
-**Current validation status (2026-10-02): do not treat this as a validated
-drop-in optimization.** The real-worker single-update checks pass, but the
-strict full-fit output-equivalence benchmark fails locally. Keep the preflight
-gate; do not launch a long run without reviewing the evidence below.
+## Frozen configuration
 
-For the agreed **standalone short screen**, use
-[the 30-minute test](SHORT_TEST.md). It runs only one VM, reports accumulated
-full-fit drift without automatically promoting the learner, and never starts
-this 24-hour workflow. Single-update correctness remains a hard gate.
+- Three seeds (0, 1, 2), each on a separate **n2-standard-16** VM, concurrently.
+- **24 active hours per seed**; playable checkpoints at 6, 12, 18 and 24 hours,
+  at the first completed outer iteration crossing each threshold.
+- Exact Experiment 5 learner: 320 traversals per player/iteration, 200 advantage
+  updates, global batch 2,048, five-million-row advantage reservoirs per player,
+  structured lossless canonical inputs, 8 x 32 residual/LayerNorm networks,
+  constant Adam learning rate 0.004, warm-start weights **and** Adam history,
+  global-minibatch target standardisation, uniform historical-strategy mixture.
+- Eight traversal/fitting workers per VM, one compute thread per worker.
+  Only execution changes: `distributed_fitting=True`.
+- Checkpoint serialization, reload validation and upload are excluded from the
+  training clock. Traversal, fitting, startup and archive capture are included.
+- All playable historical-policy archives, metadata and analysis retained.
+  **No full replay/optimizer training-state dumps** (same retention as Experiment 5).
 
-## Frozen scientific configuration
+Each seed uses one VM, not eight VMs. The central replay retains the original
+insertion and sampling rule. This tests the paper's synchronous distributed-gradient
+principle, not its distributed replay or larger hyperparameters.
 
-- Three seeds (0, 1, 2), each on its own n2-standard-16 VM.
-- 24 active training hours; playable checkpoints at 6, 12, 18 and 24 hours.
-- 320 traversals per player per iteration, divided across eight actors.
-- 200 optimizer updates per player, global batch 2048 (normally 256 per actor).
-- Identical structured observable inputs, 8 x 32 residual/LayerNorm networks,
-  constant Adam learning rate 0.004, warm-start weights AND Adam state,
-  five-million-row central advantage reservoirs, target standardization and
-  uniform historical-strategy output mixture.
-- Identical standalone rule-agent, LBR and temporal head-to-head evaluation.
-- Playable historical policies, analysis and metadata retained; no full
-  training-state dumps (this follows Experiment 5, not resumable Experiment 6).
+## Motivation and correctness
 
-## Distributed fitting
+Cloud short run `sdcfr7-short-20261002-233043` passed single-update correctness.
+Reported speedups: approximately **1.087x** for fitting, **1.068x** for short
+matched-work end-to-end timing, and **1.061x** for observed nodes/second.
+These are early-loop, one-source-seed measurements with roughly 60,619/33,336
+replay rows, not mature five-million-row buffers or evidence of playing strength.
 
-The central reservoir retains the original insertion and sampling algorithms.
-For each fit, it draws exactly the same 200 global minibatches as the baseline,
-standardizes targets over each whole minibatch, and shards its rows among the
-eight actors. Features remain losslessly packed during transfer. Each actor
-unpacks only its current minibatch. No actor owns a second full replay buffer.
+Accumulated fits were **not output-equivalent** (worst probed action-probability
+difference 1.0). Float32 multiplication/reduction order can amplify tiny differences
+through Adam, ReLU and regret matching. This study measures both quality and speed.
 
-Persistent Gloo processes compute local backward passes, sum example-weighted
-gradients, and then make identical Adam updates. There are no asynchronous or
-independent local optimization steps. Uneven and empty shards use the same
-global loss denominator. Workers receive one RPC per full fit, with direct
-Gloo collectives between optimizer steps. Replicas must have identical final
-weights AND Adam moments before rank 0's state is accepted by the driver.
-The next player then traverses against the newly fitted strategy.
+Cloud smoke retains these hard gates:
 
-This follows the paper's synchronous distributed-gradient principle, not its
-40-million-row distributed replay or larger training hyperparameters. It uses
-one VM per seed, not an eight-VM cluster. The original Experiment 5 classes and
-defaults remain unchanged.
+1. Real eight-worker single-step gradient/Adam comparisons for both players,
+   including tiny, uneven and production-sized batches and nonempty Adam history.
+2. Global target normalisation, identical sampling RNG, immutable frozen replay.
+3. Non-finite values and failed worker synchronisation fail closed. Replica weights
+   and Adam states must agree; failed partial fits are not committed or retried.
+4. Three alternating-order 200-update frozen-fit comparisons **per player**, with
+   identical initial weights, Adam history and batch streams.
+5. Tiny training, full archive reload and evaluation for both backends.
 
-Float32 batch-matrix multiplication and gradient-reduction order differ from
-the central implementation. The objective and global batch remain unchanged,
-but bitwise-identical fits or long stochastic trajectories are not promised.
-Small numerical differences can amplify through repeated Adam/ReLU updates
-and regret matching. Output quality must therefore be evaluated as well as speed.
+Only accumulated full-fit near-output differences are permitted in the approved
+comparative workflow, via explicit `--allow-trajectory-drift`. Tolerances are
+unchanged. `full_fit_equivalence_passed` and legacy `passed` remain **false**
+when drift is detected; `approved_for_comparative_run` separately reports whether
+strict correctness checks permit the quality experiment. Without that flag,
+the benchmark still enforces full-fit equivalence.
 
-## Validation and speed measurement
+Fitting timing includes preparation, transfer, reduction and state synchronisation;
+startup is separate. Production node throughput must be measured independently.
+No training algorithm hyperparameters are adjusted to obtain a speedup.
 
-Cloud smoke checks:
+## Evaluation against the existing Experiment 5
 
-1. Exact global replay batches, global target normalization and sampling RNG.
-2. Real eight-actor gradients and Adam steps versus the central reference,
-   including batch sizes smaller than the worker count and uneven shards.
-3. Actor failures fail closed; no partial fit is committed or silently retried.
-4. A three-repeat, production-sized 200-update frozen-fit benchmark. Both
-   arms begin with identical weights, nonempty Adam state and sampling seeds.
-   Arm order alternates. The source replay is generated once with a frozen
-   policy and independent traversal-phase seeds, then retained unchanged.
-5. Actual training, archive reload, and shared evaluator smoke.
+Reference metadata are checked before long training: learner configuration,
+inputs, machine class, seeds, completed schedule, clock and node definitions must
+match. Full archive hashes are checked before evaluation. Reference objects remain
+read-only. Source commits and Python/NumPy/PyTorch versions are recorded: this is a
+historical-control comparison, not contemporaneous randomised training.
 
-The benchmark reports startup separately and includes replay sampling,
-preparation, transfer, all-reduce and state synchronization in fitting time.
-It is NOT a full-run speedup estimate. The fixed global batch's numerical
-comparison is separate from all-replica synchronization checks.
+- Primary quality endpoint: **24h Experiment 7 minus Experiment 5 two-seat EV**.
+  The three same-seed pairs are the inferential units.
+- All **nine cross-seed pairings at each checkpoint**, each with 50,000 duplicate
+  deals (both seats; 100,000 hands). All-cell averages are descriptive: nine
+  correlated cells are not nine independent replicates.
+- Secondary endpoints: earlier paired EV, matched-active-time nodes and nodes/sec.
+  Tables retain actual checkpoint overshoot as well as nominal checkpoint times.
+- Shared duplicate-hand evaluator, split chance/action seeds, common random numbers.
+  Uniform historical networks are sampled per player per hand; no expensive full
+  behavioural-mixture reconstruction is needed for play.
+- Usual rule-agent matches (10,000 duplicate deals per agent/seed/checkpoint) and
+  later-versus-earlier matches (50,000 per pair/seed).
+- **Routine LBR off** (`EVAL_LBR=0`). Complete playable archives remain available
+  for later exploiter analysis. `EVAL_LBR=1` is an explicit cost-profiled addition.
 
-The full-fit equivalence gate is deliberately conservative: parameter/Adam and
-logit tolerances are absolute 0.0002 and relative 0.002; the maximum probed
-action-probability difference must be <= 0.002. A failed gate retains timing
-and difference reports and **stops the controller before paid long training**.
-Do not bypass it without explicitly reviewing the numerical drift and agreeing
-that the new arm will be assessed as a statistically comparable learner, not a
-near-identical-output execution replacement.
+Default workload: **114 tasks, 3.3 million duplicate pairs, 6.6 million hands**,
+including 36 cross-experiment tasks. A CPU cost profile gates evaluation against
+`EVAL_MAX_HOURS` (default 36). Matching completed shards are resumable.
 
-Small networks can make eight-way fitting slower because collectives, Adam
-replication and data preparation outweigh parallel matrix multiplication.
-Same-VM production nodes/hour is the primary efficiency measure; more nodes
-are not themselves proof of better policy quality.
+Tables use pointwise training-seed t intervals (n=3), exploratory and not
+multiplicity-adjusted. Head-to-head strength or higher throughput cannot establish
+lower exploitability or Nash convergence. No model is automatically promoted.
 
-## Outputs
+## Retained outputs
 
-The baseline workers/, analysis/ and evaluation/ schemas are reused. Additional
-trajectory columns record cumulative fitting time, preparation time, updates
-and examples, and the final phase's mean worker compute/communication time.
-Actor times overlap and MUST NOT be added to derive elapsed time. Central RSS
-still excludes Ray and actor memory, as explicitly stated in the manifest.
-The smoke's fitting_benchmark/ contains per-repeat numerical comparisons,
-raw timing observations and summary.json, even if full-fit equivalence fails.
+Reuse `workers/`, `analysis/`, `evaluation_no_lbr/` (or `evaluation/` with LBR).
+New artifacts under the evaluation directory:
 
-## Initial local evidence (not cloud performance)
+- `exp7_vs_exp5_by_pair.csv`: raw cell results and finite-hand uncertainty.
+- `exp7_vs_exp5_paired_head_to_head.csv`: paired summaries and training-seed intervals.
+- `exp7_vs_exp5_cross_seed_descriptive.csv`: descriptive nine-cell averages.
+- `exp7_vs_exp5_throughput_by_seed.csv` and `*_aggregate.csv`.
+- `exp7_vs_exp5_head_to_head.png`, `exp7_vs_exp5_nodes_by_training_time.png`.
+- `comparison_summary.json`, `comparison_interpretation.txt`,
+  `reference_checkpoint_index.csv` and provenance in `evaluation_manifest.json`.
 
-On macOS ARM64, PyTorch 2.7.0 / Ray 2.51.2, three alternating-order repeats of
-200 updates at global batch 2048 gave median central fitting time **1.698 s**
-and distributed fitting time **3.001 s** (0.566x throughput, not a speed-up).
-Both include sampling and fit overhead; actor startup (17.50 s) is excluded.
-This is one frozen source/seed with three optimizer sampling streams, not
-three independent long training runs. The replay fixture had 2081 rows;
-the production five-million-row replay was not memory-profiled by this check.
+Training telemetry includes cumulative fitting/preparation time and the last
+phase's actor compute/communication times. Actor times overlap; do not add them
+to derive elapsed time. Central RSS excludes Ray/actor memory.
+`smoke/fitting_benchmark/` retains correctness, drift and timing reports.
 
-Direct all-reduced gradients and individual Adam updates passed tight numerical
-checks for 3-, 17- and 2048-example batches, including nonempty Adam state.
-All replicas agree exactly. However, accumulated 200-update fits failed the
-full-fit near-output checks: in the first repeat, the largest probe logit
-difference was about 0.398 and the largest action-probability difference was
-1.0. Individual-update agreement does not justify calling long fits identical.
-The central/distributed final regression losses in that repeat were about
-0.7522/0.7537; neither those losses nor isolated policy-probe differences
-establish playing strength.
+## Launch after committing and pushing
 
-The complete ordinary test suite passed (191 tests, 11 opt-in skips); all four
-new real-Ray integration cases passed separately. Actual Experiment 7 smoke
-training saved all four policy prefixes and the shared evaluation completed
-all 13 smoke tasks. The separate full-fit gate correctly remains failed.
-A short n2-standard-16 measurement is needed before extrapolating efficiency.
-
-## Commands (after commit and push)
-
-With the existing project, region, bucket and service-account variables set:
+With `PROJECT_ID`, `REGION`, `BUCKET` and `SA_EMAIL` set for this repository:
 
 ```bash
 export REPO_REF="$(git rev-parse HEAD)"
 export RUN_ID="sdcfr7-distfit-$(date -u '+%Y%m%d-%H%M%S')"
+export EXP5_RUN_ID="sdcfr5-par8-20261002-102757"
+export EVAL_LBR=0
+export EVAL_PROFILE_ONLY=0
+export EVAL_MAX_HOURS=36
 unset RESUME_RUN_ID ADDITIONAL_HOURS
 bash gcp/run_exp7_sd_cfr_distributed_fitting_24h.sh run
 ```
 
-This submits smoke, three training VMs, aggregation, evaluation cost profiling
-and evaluation. The controller does not reach training if any smoke gate fails.
-No cloud resources are started merely by installing or testing this code.
+The commit must contain this update and be pushed. The launcher rejects older
+refs without the comparison implementation. Use a new RUN_ID, not the short
+screen's ID. No cloud resources are started by merely installing this code.
 
-Local validation with the repository dependencies:
+Stages: reference metadata/smoke → three parallel 24h runs → aggregation →
+evaluation cost profile → evaluation. The baseline learner is trained only for
+a tiny smoke fixture, never a new 24h control. Allow more than 24 elapsed hours
+for provisioning, checks, checkpoint overhead and evaluation. Concurrent training
+needs **48 N2 vCPUs** (three 16-vCPU VMs), plus the small controller.
+Profile/evaluation use eight-vCPU CPU VMs.
 
-```bash
-RUN_RAY_SD_CFR_TESTS=1 python3 -m pytest -q tests/test_sd_cfr_distributed.py tests/test_exp7_sd_cfr_distributed_fitting.py
-python3 -m experiments.fhp.exp7_sd_cfr_distributed_fitting_24h.benchmark --output /tmp/sdcfr7-fitting-check
-```
+To retry only evaluation, keep RUN_ID and EXP5_RUN_ID unchanged and use
+`bash gcp/run_exp7_sd_cfr_distributed_fitting_24h.sh evaluate-only`.
+This profiles again and reuses matching evaluation shards, without retraining.
 
-Choose a fresh output directory each time. Do not compare local ARM timings
-directly with n2-standard-16 results.
+For local validation with repository dependencies:
+`bash gcp/run_exp7_sd_cfr_distributed_fitting_24h.sh smoke-local`.
+Local ARM timings are not predictions of cloud N2 performance.

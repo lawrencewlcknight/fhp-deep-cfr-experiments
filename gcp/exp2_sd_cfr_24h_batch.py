@@ -30,7 +30,8 @@ def q(value):
 
 
 def lbr_enabled(args):
-    value = str(getattr(args, "eval_lbr", "0" if settings(args)["number"] in (2, 3, 4, 5) else "1"))
+    value = str(getattr(args, "eval_lbr", settings(args).get("default_lbr",
+                "0" if settings(args)["number"] in (2, 3, 4, 5) else "1")))
     if value not in {"0", "1"}:
         raise ValueError("EVAL_LBR must be 0 (omit) or 1 (include)")
     return value == "1"
@@ -51,9 +52,15 @@ def environment(args):
                 EVAL_LBR_DEVICE=device, EVAL_WORKERS=str(workers),
                 EVAL_LBR="1" if lbr_enabled(args) else "0",
                 EVAL_PROFILE_ONLY="1" if getattr(args, "profile_only", False) else "0")
+    if settings(args).get("comparison"):
+        result["EXP5_RUN_ID"] = reference_run_id(args)
     if getattr(args, "resume_run_id", None):
         result.update(RESUME_RUN_ID=args.resume_run_id, ADDITIONAL_HOURS=str(args.additional_hours))
     return result
+
+
+def reference_run_id(args):
+    return getattr(args, "reference_run_id", None) or settings(args)["comparison"]["default_run_id"]
 
 
 def bootstrap(args, *, controller=False, gpu=False):
@@ -146,6 +153,14 @@ trap finish EXIT
 {resume}python -m {module}.train --seed "$SEED" --output-root "$OUT" --remote-uri "$REMOTE"{resume_flags}
 """
     if stage == "smoke":
+        reference_smoke = ""
+        reference_flag = ""
+        if spec.get("comparison"):
+            reference_smoke = (f'gcloud storage rsync --recursive --exclude="(^|/)(archive|training_state)/.*" '
+                f'{q(args.bucket + "/" + reference_run_id(args) + "/workers")} "$INPUT/reference/workers"\n'
+                f'python -m {module}.comparison --validate-reference "$INPUT/reference"\n'
+                f'python -m {spec["comparison"]["module"]}.train --seed 0 --smoke --output-root "$OUT/reference_training"\n')
+            reference_flag = ' --reference-source "$OUT/reference_training"'
         test_files = " ".join(q(path) for path in
                               (spec["test_file"], *spec.get("extra_test_files", ())))
         ray_check = ""
@@ -154,16 +169,17 @@ trap finish EXIT
                          "tests/test_sd_cfr_parallel.py -k real_ray\n")
         if spec.get("fitting_benchmark"):
             ray_check += (f'python -m {module}.benchmark --output "$OUT/fitting_benchmark" '
-                          '--repeats 3\n')
+                          '--repeats 3' + (' --allow-trajectory-drift' if spec.get("allow_trajectory_drift") else '') + '\n')
         return text + f"""
 trap 'code=$?; gcloud storage rsync --recursive "$OUT" {q(remote + '/smoke')} || true; exit "$code"' EXIT
 python -m pip install -r requirements-dev.txt
 python -m pytest -q {test_files} tests/test_single_solver.py tests/test_sd_cfr_efficiency.py tests/test_sd_cfr_lbr.py tests/test_sd_cfr_no_lbr.py
+{reference_smoke}
 {ray_check}
 python -m experiments.fhp.exp1_sd_cfr_efficiency.run --seeds 0 1 2 --repeats 1 --output-dir "$OUT/equivalence"
 python -m {module}.stress --output "$OUT/capacity_stress.json"
 python -m {module}.train --seed 0 --smoke --output-root "$OUT/training"
-python -m {module}.evaluate smoke --source "$OUT/training" --output "$OUT/evaluation" --workers 2{lbr_flag}
+python -m {module}.evaluate smoke --source "$OUT/training" --output "$OUT/evaluation" --workers 2{lbr_flag}{reference_flag}
 gcloud storage rsync --recursive "$OUT" {q(remote + '/smoke')}
 """
     exclusions = " --exclude='(^|.*/)training_state/.*|.*[.]tmp$'" if spec.get("final_training_state") else ""
@@ -173,6 +189,11 @@ gcloud storage rsync --recursive "$OUT" {q(remote + '/smoke')}
 python -m {module}.report --source "$INPUT/sd" --output "$OUT/analysis"
 gcloud storage rsync --recursive "$OUT/analysis" {q(remote + '/analysis')}
 """
+    reference_flag = ""
+    if spec.get("comparison"):
+        text += (f'gcloud storage rsync --recursive --exclude="(^|/)training_state/.*|.*[.]tmp$" '
+                 f'{q(args.bucket + "/" + reference_run_id(args) + "/workers")} "$INPUT/reference/workers"\n')
+        reference_flag = ' --reference-source "$INPUT/reference"'
     text += f"""
 mkdir -p "$OUT/evaluation"
 """
@@ -195,7 +216,7 @@ trap finish EXIT
 trap 'exit 143' TERM
 python -m {module}.evaluate {'profile' if stage == 'profile' else 'run'} \
   --source "$INPUT/sd" \
-  --output "$OUT/evaluation" --workers {workers} --max-hours {args.eval_max_hours} --lbr-device {q(device)}{lbr_flag}
+  --output "$OUT/evaluation" --workers {workers} --max-hours {args.eval_max_hours} --lbr-device {q(device)}{lbr_flag}{reference_flag}
 """
     return text
 
@@ -267,12 +288,14 @@ def main(*, experiment=DEFAULT_EXPERIMENT):
         parser.add_argument("--" + name, default=os.environ.get(env, default))
     parser.add_argument("--eval-max-hours", type=float, default=float(os.environ.get("EVAL_MAX_HOURS", "36")))
     parser.add_argument("--eval-lbr", choices=("0", "1"),
-                        default=os.environ.get("EVAL_LBR", "0" if experiment["number"] in (2, 3, 4, 5) else "1"),
+                        default=os.environ.get("EVAL_LBR", experiment.get("default_lbr",
+                                               "0" if experiment["number"] in (2, 3, 4, 5) else "1")),
                         help="0: rule/temporal matches only; 1: also include full-mixture LBR")
     parser.add_argument("--eval-lbr-device", choices=("cpu", "cuda"), default=os.environ.get("EVAL_LBR_DEVICE", "cpu"))
     parser.add_argument("--eval-workers", type=int, default=int(os.environ.get("EVAL_WORKERS", "0")))
     parser.add_argument("--profile-only", action="store_true", default=os.environ.get("EVAL_PROFILE_ONLY", "0") == "1")
     parser.add_argument("--start-stage", choices=("smoke", "profile"), default="smoke")
+    parser.add_argument("--reference-run-id", default=os.environ.get("EXP5_RUN_ID") if experiment.get("comparison") else None)
     parser.add_argument("--resume-run-id", default=os.environ.get("RESUME_RUN_ID") if experiment.get("final_training_state") else None)
     parser.add_argument("--additional-hours", type=int, default=int(os.environ.get("ADDITIONAL_HOURS", "24")))
     args = parser.parse_args()
@@ -285,6 +308,9 @@ def main(*, experiment=DEFAULT_EXPERIMENT):
         parser.error("REPO_REF must be the full pushed commit SHA")
     if not 0 < args.eval_max_hours <= 96:
         parser.error("EVAL_MAX_HOURS must be in (0, 96]")
+    if experiment.get("comparison") and (not re.fullmatch(r"[a-z][a-z0-9-]{1,34}", reference_run_id(args))
+                                          or reference_run_id(args) == args.run_id):
+        parser.error("EXP5_RUN_ID must identify a distinct completed Experiment 5 run")
     if args.eval_lbr not in {"0", "1"}:
         parser.error("EVAL_LBR must be 0 (omit) or 1 (include)")
     device, workers = evaluation_settings(args)
@@ -311,6 +337,10 @@ def main(*, experiment=DEFAULT_EXPERIMENT):
         return
     if args.action in ("run", "evaluate-only", "profile-only"):
         cloud(args, "iam", "service-accounts", "describe", args.service_account)
+        if experiment.get("comparison"):
+            for seed in range(3):
+                task = f"task_{seed:03d}_{experiment['comparison']['algorithm_id']}_seed_{seed}"
+                cloud(args, "storage", "ls", f"{args.bucket}/{reference_run_id(args)}/workers/{task}/SUCCESS.json")
         if args.resume_run_id and args.action == "run":
             for seed in range(3):
                 task = f"task_{seed:03d}_{experiment['algorithm_id']}_seed_{seed}"

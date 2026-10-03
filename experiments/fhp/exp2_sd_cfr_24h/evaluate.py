@@ -176,9 +176,10 @@ def execute_task(task):
         # Query the exact behavioural mixture, but play the equivalent cheap
         # trajectory policy. The responder never sees the sampled model index.
         a, b, name_a, name_b = responder, target, "local_best_response", "sd_cfr"
-    elif kind == "temporal":
+    elif kind in {"temporal", "cross_experiment"}:
         opponent, _ = sd_policy(task["path_b"], task["sha_b"])
-        a, b, name_a, name_b = target, opponent, "sd_cfr", "earlier_sd_cfr"
+        a, b, name_a, name_b = target, opponent, "sd_cfr", (
+            "earlier_sd_cfr" if kind == "temporal" else "exp5_central_fitting_sd_cfr")
     else:
         raise ValueError(kind)
     validation = None
@@ -240,13 +241,13 @@ def run_tasks(tasks, output, *, workers):
 def profile(tasks, output, *, workers, max_hours):
     # Worst observed full-archive checkpoint across every training seed.
     probes = []
-    for kind in ("rule", "lbr", "temporal"):
+    for kind in sorted({t["kind"] for t in tasks}):
         candidates = [t for t in tasks if t["kind"] == kind
                       and t["training_hours"] == max(t["training_hours"] for t in tasks)]
         for seed in sorted({t["training_seed"] for t in candidates}):
             selected = [t for t in candidates if t["training_seed"] == seed]
             # Different rule agents induce substantially different hand lengths.
-            for task in selected if kind == "rule" else selected[:1]:
+            for task in selected if kind in {"rule", "cross_experiment"} else selected[:1]:
                 probes.append(dict(task, task_id="profile_" + task["task_id"],
                                    validate_lbr_backend=kind == "lbr",
                                    num_deals=1 if kind == "lbr" else 32))
@@ -274,7 +275,7 @@ def profile(tasks, output, *, workers, max_hours):
     return report
 
 
-def main(*, experiment=default_experiment):
+def main(*, experiment=default_experiment, comparison=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("profile", "run", "smoke"))
     parser.add_argument("--source", type=Path, required=True)
@@ -284,14 +285,25 @@ def main(*, experiment=default_experiment):
     parser.add_argument("--lbr-device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--skip-lbr", action="store_true",
                         help="Retain rule and temporal matches only; leave all source policies intact")
+    if comparison is not None:
+        parser.add_argument("--reference-source", type=Path, required=True)
     args = parser.parse_args()
     if not 1 <= args.workers <= 8 or not 0 < args.max_hours <= 96:
         parser.error("Use 1..8 workers and an evaluation budget in (0, 96] hours")
     smoke = args.mode == "smoke"
     sd = checkpoint_index(args.source, smoke=smoke, experiment=experiment)
     tasks = make_tasks(sd, smoke=smoke, lbr_device=args.lbr_device, include_lbr=not args.skip_lbr)
+    reference, source_provenance = [], {}
+    if comparison is not None:
+        source_provenance = dict(
+            candidate=comparison.validate_metadata(args.source, smoke=smoke, experiment=experiment),
+            reference=comparison.validate_metadata(args.reference_source, smoke=smoke))
+        reference = checkpoint_index(args.reference_source, smoke=smoke, experiment=comparison.baseline)
+        tasks = comparison.extend_tasks(tasks, sd, reference, smoke=smoke)
     args.output.mkdir(parents=True, exist_ok=True)
     write_csv(args.output / "checkpoint_index.csv", sd)
+    if reference:
+        write_csv(args.output / "reference_checkpoint_index.csv", reference)
     if args.mode == "profile":
         profile(tasks, args.output, workers=args.workers, max_hours=args.max_hours)
         return
@@ -318,10 +330,19 @@ def main(*, experiment=default_experiment):
                     play_policy="one_uniform_historical_network_per_player_per_hand",
                     uncertainty_unit="independent_training_seed; temporal matchups paired within seed",
                     evaluator_files={p.name: sha256(p) for p in (Path(__file__).parents[3] / "fhp_evaluation").glob("*.py")})
+    if comparison is not None:
+        manifest.update(evaluation_scope="exp7_vs_exp5_with_routine_evaluation",
+                        reference_checkpoints=reference,
+                        comparison_source_provenance=source_provenance,
+                        comparison=comparison.PROTOCOL,
+                        uncertainty_unit="training_seed_pairs; nine cross-seed cells are not nine independent replicates")
     write_json(args.output / "evaluation_manifest.json", manifest)
     results = run_tasks(tasks, args.output / "tasks", workers=args.workers)
     from .report import evaluation_report
-    evaluation_report(results, sd, args.output, smoke=smoke, include_lbr=not args.skip_lbr)
+    evaluation_report([r for r in results if r["task"]["kind"] != "cross_experiment"], sd, args.output,
+                      smoke=smoke, include_lbr=not args.skip_lbr, has_comparison=comparison is not None)
+    if comparison is not None:
+        comparison.report(results, sd, reference, args.output, smoke=smoke)
     manifest["status"] = "complete"
     write_json(args.output / "evaluation_manifest.json", manifest)
 
