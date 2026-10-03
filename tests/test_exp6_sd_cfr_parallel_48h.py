@@ -85,7 +85,7 @@ def test_evaluation_covers_eight_checkpoints_all_temporal_pairs_and_profiles_lat
     probes = []
     def fake_tasks(selected, *_args, **_kwargs):
         probes.extend(selected)
-        return [dict(task=t, elapsed_seconds=0.001) for t in selected]
+        return [dict(task=t, elapsed_seconds=0.001, lbr_backend_validation=dict(passed=True)) for t in selected]
     monkeypatch.setattr(evaluate, "run_tasks", fake_tasks)
     evaluate.profile(tasks, tmp_path, workers=8, max_hours=36)
     assert {t["training_hours"] for t in probes} == {48}

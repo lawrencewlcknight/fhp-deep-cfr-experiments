@@ -29,16 +29,34 @@ def q(value):
     return shlex.quote(str(value))
 
 
+def lbr_enabled(args):
+    value = str(getattr(args, "eval_lbr", "0" if settings(args)["number"] in (2, 3, 4, 5) else "1"))
+    if value not in {"0", "1"}:
+        raise ValueError("EVAL_LBR must be 0 (omit) or 1 (include)")
+    return value == "1"
+
+
+def evaluation_settings(args):
+    # An old GPU export must not allocate a GPU for ordinary sampled matches.
+    device = getattr(args, "eval_lbr_device", "cpu") if lbr_enabled(args) else "cpu"
+    workers = getattr(args, "eval_workers", 0) or (2 if device == "cuda" else 8)
+    return device, workers
+
+
 def environment(args):
+    device, workers = evaluation_settings(args)
     result = dict(PROJECT_ID=args.project, REGION=args.region, BUCKET=args.bucket,
                 SA_EMAIL=args.service_account, REPO_REF=args.repo_ref, RUN_ID=args.run_id,
-                EVAL_MAX_HOURS=str(args.eval_max_hours), PARALLELISM="3")
+                EVAL_MAX_HOURS=str(args.eval_max_hours), PARALLELISM="3",
+                EVAL_LBR_DEVICE=device, EVAL_WORKERS=str(workers),
+                EVAL_LBR="1" if lbr_enabled(args) else "0",
+                EVAL_PROFILE_ONLY="1" if getattr(args, "profile_only", False) else "0")
     if getattr(args, "resume_run_id", None):
         result.update(RESUME_RUN_ID=args.resume_run_id, ADDITIONAL_HOURS=str(args.additional_hours))
     return result
 
 
-def bootstrap(args, *, controller=False):
+def bootstrap(args, *, controller=False, gpu=False):
     setup = f"""#!/usr/bin/env bash
 set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1
@@ -63,7 +81,7 @@ git checkout --detach {q(args.repo_ref)}
         code = ('import json,re,sys; v=json.load(sys.stdin)["runtime"]["python"]; '
                 'assert re.fullmatch(r"3[.]11[.][0-9]+", v), "Unsupported saved Python version"; print(v)')
         python_version = f'TARGET_PYTHON_VERSION="$(gcloud storage cat {q(source)} | python3 -c {q(code)})"\n'
-    return setup + python_version + """
+    result = setup + python_version + """
 export UV_CACHE_DIR=/tmp/uv-cache UV_PYTHON_INSTALL_DIR=/tmp/uv-python
 curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/tmp/uv-bin UV_NO_MODIFY_PATH=1 sh
 export PATH="/tmp/uv-bin:$PATH"
@@ -78,6 +96,14 @@ OUT="$WORK/output"
 INPUT="$WORK/input"
 mkdir -p "$OUT" "$INPUT"
 """
+    if gpu:
+        # Evaluation only: training retains its pinned CPU wheel and machine.
+        result += """
+python -m pip install --no-cache-dir --upgrade torch==2.7.0+cu126 torchvision==0.22.0+cu126 --index-url https://download.pytorch.org/whl/cu126
+python -m pip check
+python -c 'import torch; assert torch.cuda.is_available(), "CUDA unavailable; refusing CPU fallback"; print(torch.cuda.get_device_name(0))'
+"""
+    return result
 
 
 def script(args, stage):
@@ -88,7 +114,15 @@ def script(args, stage):
     if stage == "controller":
         return bootstrap(args, controller=True) + env + "\n" + (
             f"exec python3 {q(spec['batch_script'])} orchestrate --start-stage {q(args.start_stage)}\n")
-    text = bootstrap(args) + env + "\n"
+    device, workers = evaluation_settings(args)
+    scope = "evaluation" if lbr_enabled(args) else "evaluation_no_lbr"
+    lbr_flag = "" if lbr_enabled(args) else " --skip-lbr"
+    gpu = stage in {"profile", "evaluate"} and device == "cuda"
+    text = bootstrap(args, gpu=gpu) + env + "\n"
+    if gpu and stage == "profile":
+        # requirements-dev includes the CPU requirements; do not reinstall it
+        # here and silently replace the just-validated CUDA wheel.
+        text += "python -m pip install 'pytest>=7,<9'\npython -m pytest -q tests/test_sd_cfr_lbr.py\n"
     if stage == "train":
         resume = ""
         resume_flags = ""
@@ -124,12 +158,12 @@ trap finish EXIT
         return text + f"""
 trap 'code=$?; gcloud storage rsync --recursive "$OUT" {q(remote + '/smoke')} || true; exit "$code"' EXIT
 python -m pip install -r requirements-dev.txt
-python -m pytest -q {test_files} tests/test_single_solver.py tests/test_sd_cfr_efficiency.py
+python -m pytest -q {test_files} tests/test_single_solver.py tests/test_sd_cfr_efficiency.py tests/test_sd_cfr_lbr.py tests/test_sd_cfr_no_lbr.py
 {ray_check}
 python -m experiments.fhp.exp1_sd_cfr_efficiency.run --seeds 0 1 2 --repeats 1 --output-dir "$OUT/equivalence"
 python -m {module}.stress --output "$OUT/capacity_stress.json"
 python -m {module}.train --seed 0 --smoke --output-root "$OUT/training"
-python -m {module}.evaluate smoke --source "$OUT/training" --output "$OUT/evaluation" --workers 2
+python -m {module}.evaluate smoke --source "$OUT/training" --output "$OUT/evaluation" --workers 2{lbr_flag}
 gcloud storage rsync --recursive "$OUT" {q(remote + '/smoke')}
 """
     exclusions = " --exclude='(^|.*/)training_state/.*|.*[.]tmp$'" if spec.get("final_training_state") else ""
@@ -143,11 +177,11 @@ gcloud storage rsync --recursive "$OUT/analysis" {q(remote + '/analysis')}
 mkdir -p "$OUT/evaluation"
 """
     if stage == "evaluate":
-        text += f"gcloud storage rsync --recursive {q(remote + '/evaluation')} \"$OUT/evaluation\"\n"
+        text += f"gcloud storage rsync --recursive {q(remote + '/' + scope)} \"$OUT/evaluation\"\n"
     # Preserve completed task shards even on timeout; periodically upload them
     # without repeatedly transferring the multi-GB read-only input archives.
     text += f"""
-upload() {{ gcloud storage rsync --recursive --exclude='\\.tmp$' "$OUT/evaluation" {q(remote + '/evaluation')}; }}
+upload() {{ gcloud storage rsync --recursive --exclude='\\.tmp$' "$OUT/evaluation" {q(remote + '/' + scope)}; }}
 periodic() {{ while sleep 300; do upload || true; done; }}
 periodic & UPLOAD_PID=$!
 finish() {{
@@ -161,7 +195,7 @@ trap finish EXIT
 trap 'exit 143' TERM
 python -m {module}.evaluate {'profile' if stage == 'profile' else 'run'} \
   --source "$INPUT/sd" \
-  --output "$OUT/evaluation" --workers 8 --max-hours {args.eval_max_hours}
+  --output "$OUT/evaluation" --workers {workers} --max-hours {args.eval_max_hours} --lbr-device {q(device)}{lbr_flag}
 """
     return text
 
@@ -182,8 +216,10 @@ def build_job(args, stage):
                    "profile": 14400, "evaluate": int((args.eval_max_hours + 2) * 3600)}[stage]
         if stage == "train":
             seconds = settings(args).get("train_max_seconds", seconds)
+        if stage in {"profile", "evaluate"} and evaluation_settings(args)[0] == "cuda":
+            machine = "g2-standard-8"  # One 24-GB L4; opt-in, never changes training.
     count = 3 if stage == "train" else 1
-    return dict(taskGroups=[dict(taskSpec=dict(runnables=[dict(script=dict(text=script(args, stage)))],
+    result = dict(taskGroups=[dict(taskSpec=dict(runnables=[dict(script=dict(text=script(args, stage)))],
                 computeResource=dict(cpuMilli=cpu, memoryMib=memory), maxRetryCount=0,
                 maxRunDuration=f"{seconds}s"), taskCount=count, parallelism=count, taskCountPerNode=1)],
                 allocationPolicy=dict(serviceAccount=dict(email=args.service_account),
@@ -191,6 +227,9 @@ def build_job(args, stage):
                 bootDisk=dict(sizeGb=disk, type="pd-balanced")))]),
                 logsPolicy=dict(destination="CLOUD_LOGGING"),
                 labels=dict(experiment=f"fhp-sdcfr-exp{settings(args)['number']}-{settings(args).get('hours', 24)}h", stage=stage))
+    if stage in {"profile", "evaluate"} and evaluation_settings(args)[0] == "cuda":
+        result["allocationPolicy"]["instances"][0]["installGpuDrivers"] = True
+    return result
 
 
 def cloud(args, *command, capture=False):
@@ -221,12 +260,18 @@ def wait(args, name):
 
 def main(*, experiment=DEFAULT_EXPERIMENT):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("run", "orchestrate", "status", "dry-run", "evaluate-only"))
+    parser.add_argument("action", choices=("run", "orchestrate", "status", "dry-run", "evaluate-only", "profile-only"))
     for name, env, default in (("project", "PROJECT_ID", None), ("region", "REGION", None),
                               ("bucket", "BUCKET", None), ("service-account", "SA_EMAIL", None),
                               ("repo-ref", "REPO_REF", None), ("run-id", "RUN_ID", None)):
         parser.add_argument("--" + name, default=os.environ.get(env, default))
     parser.add_argument("--eval-max-hours", type=float, default=float(os.environ.get("EVAL_MAX_HOURS", "36")))
+    parser.add_argument("--eval-lbr", choices=("0", "1"),
+                        default=os.environ.get("EVAL_LBR", "0" if experiment["number"] in (2, 3, 4, 5) else "1"),
+                        help="0: rule/temporal matches only; 1: also include full-mixture LBR")
+    parser.add_argument("--eval-lbr-device", choices=("cpu", "cuda"), default=os.environ.get("EVAL_LBR_DEVICE", "cpu"))
+    parser.add_argument("--eval-workers", type=int, default=int(os.environ.get("EVAL_WORKERS", "0")))
+    parser.add_argument("--profile-only", action="store_true", default=os.environ.get("EVAL_PROFILE_ONLY", "0") == "1")
     parser.add_argument("--start-stage", choices=("smoke", "profile"), default="smoke")
     parser.add_argument("--resume-run-id", default=os.environ.get("RESUME_RUN_ID") if experiment.get("final_training_state") else None)
     parser.add_argument("--additional-hours", type=int, default=int(os.environ.get("ADDITIONAL_HOURS", "24")))
@@ -240,6 +285,11 @@ def main(*, experiment=DEFAULT_EXPERIMENT):
         parser.error("REPO_REF must be the full pushed commit SHA")
     if not 0 < args.eval_max_hours <= 96:
         parser.error("EVAL_MAX_HOURS must be in (0, 96]")
+    if args.eval_lbr not in {"0", "1"}:
+        parser.error("EVAL_LBR must be 0 (omit) or 1 (include)")
+    device, workers = evaluation_settings(args)
+    if device not in {"cpu", "cuda"} or not 1 <= workers <= (4 if device == "cuda" else 8):
+        parser.error("EVAL_WORKERS: 1..8 for CPU, 1..4 sharing the evaluation GPU")
     if args.resume_run_id:
         if (not experiment.get("final_training_state")
                 or not re.fullmatch(r"[a-z][a-z0-9-]{1,34}", args.resume_run_id)
@@ -248,7 +298,9 @@ def main(*, experiment=DEFAULT_EXPERIMENT):
     args.bucket = args.bucket.rstrip("/")
     if not args.bucket.startswith("gs://"):
         args.bucket = "gs://" + args.bucket
-    if args.action == "evaluate-only":
+    if args.action == "profile-only":
+        args.profile_only = True
+    if args.action in {"evaluate-only", "profile-only"} or args.profile_only:
         args.start_stage = "profile"
     if args.action == "dry-run":
         print(json.dumps({stage: build_job(args, stage) for stage in ("controller",) + STAGES}, indent=2))
@@ -257,19 +309,19 @@ def main(*, experiment=DEFAULT_EXPERIMENT):
         cloud(args, "batch", "jobs", "list", "--location", args.region,
               "--filter", f"name:{args.run_id}", "--format=table(name.basename(),status.state)")
         return
-    if args.action in ("run", "evaluate-only"):
+    if args.action in ("run", "evaluate-only", "profile-only"):
         cloud(args, "iam", "service-accounts", "describe", args.service_account)
         if args.resume_run_id and args.action == "run":
             for seed in range(3):
                 task = f"task_{seed:03d}_{experiment['algorithm_id']}_seed_{seed}"
                 cloud(args, "storage", "ls", f"{args.bucket}/{args.resume_run_id}/workers/{task}/training_state/manifest.json")
-        tag = "-" + time.strftime("%H%M%S", time.gmtime()) if args.action == "evaluate-only" else ""
+        tag = "-" + time.strftime("%H%M%S", time.gmtime()) if args.start_stage == "profile" else ""
         name = submit(args, "controller", retry_tag=tag)
         print(f"Submitted {name}; the laptop may disconnect. Outputs: {args.bucket}/{args.run_id}")
         return
     # Controller identity must have child-job creation + service-account use.
     cloud(args, "batch", "jobs", "list", "--location", args.region, "--limit=1")
-    stages = STAGES[STAGES.index(args.start_stage):]
+    stages = ("profile",) if args.profile_only else STAGES[STAGES.index(args.start_stage):]
     tag = "-" + time.strftime("%H%M%S", time.gmtime()) if args.start_stage == "profile" else ""
     for stage in stages:
         wait(args, submit(args, stage, retry_tag=tag))

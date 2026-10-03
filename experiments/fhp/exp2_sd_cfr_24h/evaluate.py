@@ -16,9 +16,11 @@ import torch
 
 from deep_cfr_poker.game import load_fhp_game
 from deep_cfr_poker.sd_cfr_disk import (DiskArchiveReader, DiskSampledPolicy,
-                                       DiskBehaviouralPolicy, sha256, write_json)
+                                       sha256, write_json)
+from deep_cfr_poker.sd_cfr_lbr import BatchedDiskBehaviouralPolicy, ExactSDCFRLocalBestResponsePolicy
+from deep_cfr_poker.sd_cfr_lbr_audit import validate_queries
 from fhp_evaluation.duplicate import evaluate_duplicate_match
-from fhp_evaluation.lbr import LBRConfig, LocalBestResponsePolicy
+from fhp_evaluation.lbr import LBRConfig
 from fhp_evaluation.rule_agents import PUBLISHED_AGENT_NAMES, published_rule_agents
 from . import config as default_experiment
 from .config import (BASE_SEED, RULE_DEALS,
@@ -86,7 +88,9 @@ def checkpoint_index(root, *, smoke=False, experiment=default_experiment):
     return records
 
 
-def make_tasks(records, *, smoke=False):
+def make_tasks(records, *, smoke=False, lbr_device="cpu", include_lbr=True):
+    if lbr_device not in ("cpu", "cuda"):
+        raise ValueError("Unknown LBR device")
     tasks = []
     by_key = {(r["seed"], r["training_hours"]): r for r in records}
     seeds = (0,) if smoke else sorted({r["seed"] for r in records})
@@ -101,7 +105,7 @@ def make_tasks(records, *, smoke=False):
                 tasks.append(dict(**base, task_id=f"rule_s{seed}_{hour}h_{opponent}",
                                   kind="rule", opponent=opponent, num_deals=2 if smoke else RULE_DEALS,
                                   evaluation_seed=BASE_SEED + 100000 + index))
-            shard_count = 1 if smoke else LBR_DEALS // LBR_SHARD_DEALS
+            shard_count = (1 if smoke else LBR_DEALS // LBR_SHARD_DEALS) if include_lbr else 0
             for shard in range(shard_count):
                 tasks.append(dict(**base, task_id=f"lbr_s{seed}_{hour}h_{shard:04d}", kind="lbr",
                                   shard_index=shard, num_deals=1 if smoke else LBR_SHARD_DEALS,
@@ -116,7 +120,8 @@ def make_tasks(records, *, smoke=False):
                               num_deals=2 if smoke else CROSSPLAY_DEALS,
                               evaluation_seed=BASE_SEED + 2000000 + earlier * 1000 + later))
     root = Path(__file__).resolve().parents[3]
-    sources = [Path(__file__), root / "deep_cfr_poker/sd_cfr_disk.py",
+    sources = [Path(__file__), Path(__file__).with_name("report.py"), root / "deep_cfr_poker/sd_cfr_disk.py",
+               root / "deep_cfr_poker/sd_cfr_lbr.py", root / "deep_cfr_poker/sd_cfr_lbr_audit.py",
                root / "deep_cfr_poker/fhp_features.py",
                root / "deep_cfr_poker/networks.py", root / "deep_cfr_poker/game.py",
                *sorted((root / "fhp_evaluation").glob("*.py"))]
@@ -124,6 +129,9 @@ def make_tasks(records, *, smoke=False):
                                               sort_keys=True).encode()).hexdigest()
     for task in tasks:
         task["evaluation_protocol"] = "fhp_sdcfr_split_seeds_v1"
+        task["lbr_enabled"] = include_lbr
+        task["lbr_backend"] = "exact_batched_own_reach_v1" if include_lbr else None
+        task["lbr_device"] = lbr_device if include_lbr else None
         task["implementation_sha256"] = implementation
     return tasks
 
@@ -136,15 +144,16 @@ def initialise_worker():
     torch.set_num_interop_threads(1)
 
 
-def sd_policy(path, digest):
-    key = (path, digest)
+def sd_policy(path, digest, *, lbr_device="cpu", need_mixture=False):
+    key = (path, digest, lbr_device if need_mixture else None)
     if key not in _CACHE:
         # Full chunk hashes were validated once in the parent before dispatch.
         if sha256(path) != digest:
             raise ValueError("Checkpoint manifest changed during evaluation")
         game = load_fhp_game()
         reader = DiskArchiveReader(path, game, verify=False)
-        _CACHE[key] = (DiskSampledPolicy(reader), DiskBehaviouralPolicy(reader, game))
+        mixture = BatchedDiskBehaviouralPolicy(reader, game, device=lbr_device) if need_mixture else None
+        _CACHE[key] = (DiskSampledPolicy(reader), mixture)
     _CACHE.move_to_end(key)
     while len(_CACHE) > 2:
         _CACHE.popitem(last=False)
@@ -153,14 +162,16 @@ def sd_policy(path, digest):
 
 def execute_task(task):
     started = time.perf_counter()
+    task_started = started
     game = load_fhp_game()
-    target, mixture = sd_policy(task["path_a"], task["sha_a"])
     kind = task["kind"]
+    target, mixture = sd_policy(task["path_a"], task["sha_a"],
+                               lbr_device=task.get("lbr_device") or "cpu", need_mixture=kind == "lbr")
     if kind == "rule":
         opponent = published_rule_agents(game)[task["opponent"]]
         a, b, name_a, name_b = target, opponent, "sd_cfr", task["opponent"]
     elif kind == "lbr":
-        responder = LocalBestResponsePolicy(game, mixture, config=LBRConfig(
+        responder = ExactSDCFRLocalBestResponsePolicy(game, mixture, config=LBRConfig(
             seed=task["lbr_seed"], preflop_rollout_samples=task["lbr_rollouts"]))
         # Query the exact behavioural mixture, but play the equivalent cheap
         # trajectory policy. The responder never sees the sampled model index.
@@ -170,6 +181,12 @@ def execute_task(task):
         a, b, name_a, name_b = target, opponent, "sd_cfr", "earlier_sd_cfr"
     else:
         raise ValueError(kind)
+    validation = None
+    if kind == "lbr" and task.get("validate_lbr_backend"):
+        validation = validate_queries(mixture.reader, game, batched=mixture)
+        # Separate gate overhead from per-deal throughput, while retaining
+        # total task duration and all full-archive production probes.
+        started = time.perf_counter()
     result = evaluate_duplicate_match(game, a, b, num_deals=task["num_deals"],
                                       seed=task["evaluation_seed"], policy_a_name=name_a,
                                       policy_b_name=name_b, seed_layout="split").to_dict()
@@ -181,7 +198,11 @@ def execute_task(task):
                 result[key] = None
             else:
                 raise RuntimeError(f"Non-finite evaluation result: {key}")
-    return dict(task=task, result=result, elapsed_seconds=time.perf_counter() - started)
+    output = dict(task=task, result=result, elapsed_seconds=time.perf_counter() - started)
+    if validation is not None:
+        output["lbr_backend_validation"] = validation
+        output["total_elapsed_seconds_including_validation"] = time.perf_counter() - task_started
+    return output
 
 
 def task_fingerprint(tasks):
@@ -227,8 +248,13 @@ def profile(tasks, output, *, workers, max_hours):
             # Different rule agents induce substantially different hand lengths.
             for task in selected if kind == "rule" else selected[:1]:
                 probes.append(dict(task, task_id="profile_" + task["task_id"],
+                                   validate_lbr_backend=kind == "lbr",
                                    num_deals=1 if kind == "lbr" else 32))
     measurements = run_tasks(probes, Path(output) / "profile_tasks", workers=workers)
+    validations = [r.get("lbr_backend_validation", {}) for r in measurements if r["task"]["kind"] == "lbr"]
+    expected_validations = len({t["training_seed"] for t in tasks if t["kind"] == "lbr"})
+    if len(validations) != expected_validations or not all(v.get("passed") for v in validations):
+        raise RuntimeError("Missing/failed full-archive LBR numerical validation")
     rate = {kind: max(r["elapsed_seconds"] / r["task"]["num_deals"]
                      for r in measurements if r["task"]["kind"] == kind)
             for kind in {t["kind"] for t in tasks}}
@@ -236,6 +262,10 @@ def profile(tasks, output, *, workers, max_hours):
     report = dict(task_fingerprint=task_fingerprint(tasks), seconds_per_pair=rate,
                   estimated_elapsed_hours_with_2x_margin=estimated_hours, workers=workers,
                   allowed_elapsed_hours=max_hours, passed=estimated_hours <= max_hours,
+                  lbr_enabled=bool(expected_validations),
+                  lbr_status="included" if expected_validations else "omitted_by_configuration",
+                  lbr_backend="exact_batched_own_reach_v1" if expected_validations else None,
+                  lbr_validations=validations,
                   caveat="Pilot extrapolation, not a guaranteed completion time; no archive truncation")
     write_json(Path(output) / "evaluation_profile.json", report)
     if not report["passed"]:
@@ -251,12 +281,15 @@ def main(*, experiment=default_experiment):
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--max-hours", type=float, default=36)
+    parser.add_argument("--lbr-device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--skip-lbr", action="store_true",
+                        help="Retain rule and temporal matches only; leave all source policies intact")
     args = parser.parse_args()
     if not 1 <= args.workers <= 8 or not 0 < args.max_hours <= 96:
         parser.error("Use 1..8 workers and an evaluation budget in (0, 96] hours")
     smoke = args.mode == "smoke"
     sd = checkpoint_index(args.source, smoke=smoke, experiment=experiment)
-    tasks = make_tasks(sd, smoke=smoke)
+    tasks = make_tasks(sd, smoke=smoke, lbr_device=args.lbr_device, include_lbr=not args.skip_lbr)
     args.output.mkdir(parents=True, exist_ok=True)
     write_csv(args.output / "checkpoint_index.csv", sd)
     if args.mode == "profile":
@@ -276,14 +309,19 @@ def main(*, experiment=default_experiment):
                     evaluated_hours=sorted({task["training_hours"] for task in tasks}),
                     evaluation_scope="standalone_sd_cfr",
                     task_fingerprint=task_fingerprint(tasks), tasks=len(tasks),
-                    source_checkpoints=sd, lbr_policy="exact_own_reach_historical_mixture",
+                    source_checkpoints=sd, lbr_enabled=not args.skip_lbr,
+                    lbr_status="omitted_by_configuration" if args.skip_lbr else "included",
+                    evaluated_metrics=sorted({task["kind"] for task in tasks}),
+                    lbr_policy=None if args.skip_lbr else "exact_own_reach_historical_mixture",
+                    lbr_backend=None if args.skip_lbr else "exact_batched_own_reach_v1",
+                    lbr_device=None if args.skip_lbr else args.lbr_device,
                     play_policy="one_uniform_historical_network_per_player_per_hand",
                     uncertainty_unit="independent_training_seed; temporal matchups paired within seed",
                     evaluator_files={p.name: sha256(p) for p in (Path(__file__).parents[3] / "fhp_evaluation").glob("*.py")})
     write_json(args.output / "evaluation_manifest.json", manifest)
     results = run_tasks(tasks, args.output / "tasks", workers=args.workers)
     from .report import evaluation_report
-    evaluation_report(results, sd, args.output, smoke=smoke)
+    evaluation_report(results, sd, args.output, smoke=smoke, include_lbr=not args.skip_lbr)
     manifest["status"] = "complete"
     write_json(args.output / "evaluation_manifest.json", manifest)
 

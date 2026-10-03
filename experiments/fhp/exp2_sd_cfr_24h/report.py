@@ -25,7 +25,7 @@ def summary(values):
                 ci95_high=mean + margin if margin is not None else None)
 
 
-def evaluation_report(results, sd, output, *, smoke=False):
+def evaluation_report(results, sd, output, *, smoke=False, include_lbr=True):
     output = Path(output)
     experiment_ids = {row["experiment"] for row in sd}
     if len(experiment_ids) != 1:
@@ -33,6 +33,12 @@ def evaluation_report(results, sd, output, *, smoke=False):
     experiment_id = experiment_ids.pop()
     if any(item["task"]["kind"] not in {"rule", "lbr", "temporal"} for item in results):
         raise ValueError("Only standalone SD-CFR evaluation tasks are supported")
+    kinds = {item["task"]["kind"] for item in results}
+    expected_kinds = {"rule", "temporal", "lbr"} if include_lbr else {"rule", "temporal"}
+    if kinds != expected_kinds:
+        raise ValueError("Evaluation results do not match the requested LBR scope")
+    if not include_lbr and any((output / name).exists() for name in ("lbr_by_seed.csv", "lbr_aggregate.csv")):
+        raise ValueError("Use a separate no-LBR output directory; preserve existing LBR results")
     rows = [dict(**{k: v for k, v in item["task"].items() if not k.startswith("path_")},
                  **item["result"], evaluation_seconds=item["elapsed_seconds"], experiment=experiment_id)
             for item in results]
@@ -51,7 +57,8 @@ def evaluation_report(results, sd, output, *, smoke=False):
                         mean_mbb_per_hand=float(np.average([s["mean_mbb_per_hand"] for s in shards], weights=counts)),
                         interpretation="sampled_LBR_value_not_exact_exploitability"))
     write_csv(output / "rule_agent_by_seed.csv", rule)
-    write_csv(output / "lbr_by_seed.csv", lbr)
+    if include_lbr:
+        write_csv(output / "lbr_by_seed.csv", lbr)
     agent_groups = defaultdict(list)
     for row in rule:
         agent_groups[row["experiment"], row["training_hours"], row["opponent"]].append(row["mean_mbb_per_hand"])
@@ -77,7 +84,8 @@ def evaluation_report(results, sd, output, *, smoke=False):
                 mean_nodes=float(np.mean([indexes[experiment, r["training_seed"], hour]["nodes_touched"] for r in values])),
                 **summary([r["mean_mbb_per_hand"] for r in values])))
     write_csv(output / "quality_aggregate.csv", aggregates)
-    write_csv(output / "lbr_aggregate.csv", [row for row in aggregates if row["metric"] == "lbr"])
+    if include_lbr:
+        write_csv(output / "lbr_aggregate.csv", [row for row in aggregates if row["metric"] == "lbr"])
     write_csv(output / "rule_agent_mean_aggregate.csv", [row for row in aggregates if row["metric"] == "rule_agent_mean"])
     temporal_groups = defaultdict(list)
     for row in temporal:
@@ -103,10 +111,12 @@ def evaluation_report(results, sd, output, *, smoke=False):
     fig.tight_layout()
     fig.savefig(output / "temporal_head_to_head.png", dpi=180)
     plt.close(fig)
+    panels = [("rule_agent_mean", "Five-agent mean (higher better)")]
+    if include_lbr:
+        panels.append(("lbr", "LBR value (lower better)"))
     for xkey, label in (("training_hours", "Active training hours"), ("mean_nodes", "Mean training nodes touched")):
-        fig, axes = plt.subplots(1, 2, figsize=(11, 4))
-        for axis, metric, title in zip(axes, ("rule_agent_mean", "lbr"),
-                                       ("Five-agent mean (higher better)", "LBR value (lower better)")):
+        fig, axes = plt.subplots(1, len(panels), figsize=(11 if include_lbr else 7, 4), squeeze=False)
+        for axis, (metric, title) in zip(axes.flat, panels):
             for experiment in sorted({r["experiment"] for r in aggregates}):
                 selected = sorted([r for r in aggregates if r["metric"] == metric and r["experiment"] == experiment],
                                   key=lambda r: r[xkey])
@@ -119,12 +129,16 @@ def evaluation_report(results, sd, output, *, smoke=False):
         fig.tight_layout()
         fig.savefig(output / f"policy_quality_by_{xkey}.png", dpi=180)
         plt.close(fig)
+    lbr_note = ("LBR is a sampled lower-bound diagnostic, not exact exploitability or a convergence certificate.\n"
+                if include_lbr else
+                "LBR was deliberately omitted; no exploitability or exploiter estimate is reported.\n")
     (output / "interpretation.txt").write_text(
         "Standalone SD-CFR evaluation; no cross-algorithm comparisons are included.\n"
         "Error bars use independent training seeds, not hands; temporal matchups are paired within seed.\n"
-        "LBR is a sampled lower-bound diagnostic, not exact exploitability or a convergence certificate.\n"
+        + lbr_note +
+        "Rule-agent and temporal results measure playing strength against those opponents, not Nash convergence.\n"
         "Active time excludes checkpoint overhead. Node curves join observed checkpoint means.\n"
-        "Playable checkpoints and evaluator provenance are retained for later comparative analysis.\n")
+        "Playable checkpoints and evaluator provenance are retained for later comparative/exploiter analysis.\n")
 
 
 def training_report(source, output, *, experiment=default_experiment):

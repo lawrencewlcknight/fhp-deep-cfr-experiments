@@ -1,0 +1,382 @@
+{
+  "date": "2026-10-03",
+  "scope": "CPU target-query diagnostic only, not a full-archive or full-evaluation runtime measurement",
+  "models_per_player": 128,
+  "hardware": "Local Apple Silicon; one PyTorch CPU thread",
+  "repeats": 1,
+  "protocol": {
+    "lbr_rollouts": 4096,
+    "lbr_seed": 21760922,
+    "historical_weighting": "uniform own-reach mixture",
+    "mixed_precision": false
+  },
+  "limitations": [
+    "Only first 128 saved networks from each actual run; production checkpoints contain more than 12000 per player.",
+    "Five fixed information states; timings exclude equity scoring and most whole-job overhead.",
+    "No GPU hardware validation was performed locally. No extrapolated end-to-end speedup is asserted."
+  ],
+  "representations": {
+    "raw": {
+      "archive_sha256": "fe5f594d901668a1cd9cb35a90a743d9aa079e7e13580d1c6b2c2c2ed53c0f20",
+      "models_per_player": 128,
+      "feature_encoder": null,
+      "torch_version": "2.7.0",
+      "torch_threads": 1,
+      "correctness": {
+        "models_per_player": 128,
+        "queries": 5,
+        "tolerance": 0.000002,
+        "max_probability_error": 2.2066892108041358e-7,
+        "max_reach_error": 1.0849396644974085e-7,
+        "passed": true
+      },
+      "full_lbr_comparisons": [
+        {
+          "history": [
+            0,
+            4,
+            8,
+            12
+          ],
+          "max_range_error": 0,
+          "speedup": 10.241930984516223,
+          "backends": [
+            {
+              "backend": "DiskBehaviouralPolicy",
+              "query_seconds": 3.388779291184619,
+              "fold_probability": 0.17400894959138402,
+              "action": {
+                "0": 1
+              }
+            },
+            {
+              "backend": "BatchedDiskBehaviouralPolicy",
+              "query_seconds": 0.3308730840217322,
+              "fold_probability": 0.17400895402764754,
+              "action": {
+                "0": 1
+              }
+            }
+          ]
+        },
+        {
+          "history": [
+            0,
+            4,
+            8,
+            12,
+            2
+          ],
+          "max_range_error": 2.7675946485733113e-9,
+          "speedup": 12.880849624388519,
+          "backends": [
+            {
+              "backend": "DiskBehaviouralPolicy",
+              "query_seconds": 6.89625179185532,
+              "fold_probability": 0.058415225591955534,
+              "action": {
+                "1": 1
+              }
+            },
+            {
+              "backend": "BatchedDiskBehaviouralPolicy",
+              "query_seconds": 0.5353879590984434,
+              "fold_probability": 0.058415215858624026,
+              "action": {
+                "1": 1
+              }
+            }
+          ]
+        },
+        {
+          "history": [
+            0,
+            4,
+            8,
+            12,
+            2,
+            2,
+            2
+          ],
+          "max_range_error": 3.0074570893552643e-9,
+          "speedup": 13.015086817655796,
+          "backends": [
+            {
+              "backend": "DiskBehaviouralPolicy",
+              "query_seconds": 7.135250749997795,
+              "fold_probability": null,
+              "action": {
+                "1": 1
+              }
+            },
+            {
+              "backend": "BatchedDiskBehaviouralPolicy",
+              "query_seconds": 0.5482292089145631,
+              "fold_probability": null,
+              "action": {
+                "1": 1
+              }
+            }
+          ]
+        },
+        {
+          "history": [
+            0,
+            4,
+            8,
+            12,
+            1,
+            1,
+            16,
+            20,
+            32
+          ],
+          "max_range_error": 1.956745786235725e-9,
+          "speedup": 9.642062384112645,
+          "backends": [
+            {
+              "backend": "DiskBehaviouralPolicy",
+              "query_seconds": 6.1703197080641985,
+              "fold_probability": 0.05959507814795653,
+              "action": {
+                "2": 1
+              }
+            },
+            {
+              "backend": "BatchedDiskBehaviouralPolicy",
+              "query_seconds": 0.6399377500638366,
+              "fold_probability": 0.05959506876253769,
+              "action": {
+                "2": 1
+              }
+            }
+          ]
+        },
+        {
+          "history": [
+            0,
+            4,
+            8,
+            12,
+            1,
+            1,
+            16,
+            20,
+            32,
+            2
+          ],
+          "max_range_error": 1.9916763785627657e-9,
+          "speedup": 12.788198884969614,
+          "backends": [
+            {
+              "backend": "DiskBehaviouralPolicy",
+              "query_seconds": 10.065923833055422,
+              "fold_probability": 0.12690424728882907,
+              "action": {
+                "2": 1
+              }
+            },
+            {
+              "backend": "BatchedDiskBehaviouralPolicy",
+              "query_seconds": 0.7871259998064488,
+              "fold_probability": 0.12690424832168198,
+              "action": {
+                "2": 1
+              }
+            }
+          ]
+        }
+      ],
+      "source": "gs://clever-overview-399515-fhp-deep-cfr-results/sdcfr2-24h-20261002-003338/workers/task_000_optimised_uniform_sd_cfr_seed_0/archive"
+    },
+    "encoded": {
+      "archive_sha256": "9b7dbbab8de4a064fb5fe819966a7d08d658a9a1eadea9ef0ebb8a1d9e65a93f",
+      "models_per_player": 128,
+      "feature_encoder": {
+        "id": "fhp_lossless_suit_canonical_v1",
+        "version": 1,
+        "lossless_modulo_suit_symmetry": true,
+        "policy_layout": {
+          "name": "player_information_state",
+          "total_size": 183,
+          "card_size": 104
+        },
+        "full_state_layout": {
+          "name": "critic_full_state",
+          "total_size": 263,
+          "card_size": 156
+        },
+        "card_order": "channel_suit_rank",
+        "betting_encoding": "two_rounds_five_slots_fold_call_raise_one_hot"
+      },
+      "torch_version": "2.7.0",
+      "torch_threads": 1,
+      "correctness": {
+        "models_per_player": 128,
+        "queries": 5,
+        "tolerance": 0.000002,
+        "max_probability_error": 1.437343526491941e-7,
+        "max_reach_error": 1.437343526491941e-7,
+        "passed": true
+      },
+      "full_lbr_comparisons": [
+        {
+          "history": [
+            0,
+            4,
+            8,
+            12
+          ],
+          "max_range_error": 0,
+          "speedup": 53.19503566185923,
+          "backends": [
+            {
+              "backend": "DiskBehaviouralPolicy",
+              "query_seconds": 5.265377625124529,
+              "fold_probability": 0.21688083162659816,
+              "action": {
+                "0": 1
+              }
+            },
+            {
+              "backend": "BatchedDiskBehaviouralPolicy",
+              "query_seconds": 0.09898250014521182,
+              "fold_probability": 0.21688082542870443,
+              "action": {
+                "0": 1
+              }
+            }
+          ]
+        },
+        {
+          "history": [
+            0,
+            4,
+            8,
+            12,
+            2
+          ],
+          "max_range_error": 1.4808879027564115e-9,
+          "speedup": 56.774371623281844,
+          "backends": [
+            {
+              "backend": "DiskBehaviouralPolicy",
+              "query_seconds": 7.697812333004549,
+              "fold_probability": 0.019407542761278034,
+              "action": {
+                "1": 1
+              }
+            },
+            {
+              "backend": "BatchedDiskBehaviouralPolicy",
+              "query_seconds": 0.13558604195713997,
+              "fold_probability": 0.01940756021986259,
+              "action": {
+                "1": 1
+              }
+            }
+          ]
+        },
+        {
+          "history": [
+            0,
+            4,
+            8,
+            12,
+            2,
+            2,
+            2
+          ],
+          "max_range_error": 2.5425181740795083e-9,
+          "speedup": 62.300771778976184,
+          "backends": [
+            {
+              "backend": "DiskBehaviouralPolicy",
+              "query_seconds": 7.350120458053425,
+              "fold_probability": null,
+              "action": {
+                "1": 1
+              }
+            },
+            {
+              "backend": "BatchedDiskBehaviouralPolicy",
+              "query_seconds": 0.1179780000820756,
+              "fold_probability": null,
+              "action": {
+                "1": 1
+              }
+            }
+          ]
+        },
+        {
+          "history": [
+            0,
+            4,
+            8,
+            12,
+            1,
+            1,
+            16,
+            20,
+            32
+          ],
+          "max_range_error": 1.1005228653295646e-9,
+          "speedup": 41.53121020006342,
+          "backends": [
+            {
+              "backend": "DiskBehaviouralPolicy",
+              "query_seconds": 6.446687290910631,
+              "fold_probability": 0.18267824733178722,
+              "action": {
+                "2": 1
+              }
+            },
+            {
+              "backend": "BatchedDiskBehaviouralPolicy",
+              "query_seconds": 0.15522512490861118,
+              "fold_probability": 0.1826782352319618,
+              "action": {
+                "2": 1
+              }
+            }
+          ]
+        },
+        {
+          "history": [
+            0,
+            4,
+            8,
+            12,
+            1,
+            1,
+            16,
+            20,
+            32,
+            2
+          ],
+          "max_range_error": 2.5303784477893193e-9,
+          "speedup": 65.5352022101805,
+          "backends": [
+            {
+              "backend": "DiskBehaviouralPolicy",
+              "query_seconds": 13.717902250122279,
+              "fold_probability": 0.26576505030476283,
+              "action": {
+                "2": 1
+              }
+            },
+            {
+              "backend": "BatchedDiskBehaviouralPolicy",
+              "query_seconds": 0.2093211249448359,
+              "fold_probability": 0.2657650533403201,
+              "action": {
+                "2": 1
+              }
+            }
+          ]
+        }
+      ],
+      "source": "gs://clever-overview-399515-fhp-deep-cfr-results/sdcfr3-24h-20261002-010643/workers/task_000_structured_uniform_sd_cfr_seed_0/archive"
+    }
+  }
+}

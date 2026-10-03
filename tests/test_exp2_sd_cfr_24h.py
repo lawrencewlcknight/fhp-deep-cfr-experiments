@@ -331,7 +331,8 @@ def test_production_profile_and_evaluation_cli_need_only_own_checkpoints(tmp_pat
         assert workers == 8
         assert {task["kind"] for task in tasks} == {"rule", "lbr", "temporal"}
         assert all(task["path_a"].startswith("sd-") for task in tasks)
-        return [dict(task=task, result=dict(mean_mbb_per_hand=10.), elapsed_seconds=.001)
+        return [dict(task=task, result=dict(mean_mbb_per_hand=10.), elapsed_seconds=.001,
+                     lbr_backend_validation=dict(passed=True))
                 for task in tasks]
     monkeypatch.setattr(evaluate, "checkpoint_index", index)
     monkeypatch.setattr(evaluate, "run_tasks", run_tasks)
