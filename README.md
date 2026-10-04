@@ -2,6 +2,13 @@
 
 ## Shared policy evaluation
 
+A dedicated evaluation-only job compares the saved **SD-CFR Experiment 5**
+and **UCV-ESCHER Experiment 9** policies across all nine seed combinations,
+at matched training times and two approximate node budgets. It retains the
+full SD-CFR historical mixture, omits LBR, and includes a timing gate and
+resumable result shards. See the
+[cross-algorithm head-to-head specification](experiments/fhp/retrospective_sd5_ucv9_evaluation/README.md).
+
 Conventional FHP snapshots use the shared `fhp-evaluation-suite` API. A pinned
 snapshot of that evaluator is bundled for reproducible cloud runs; its
 provenance and minimal SD-CFR extensions are in `fhp_evaluation/VENDORED_FROM.md`.
