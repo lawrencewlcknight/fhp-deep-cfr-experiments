@@ -5,6 +5,7 @@ import itertools
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 from types import SimpleNamespace
 
@@ -197,6 +198,37 @@ def test_cloud_plan_uses_batch_default_image_for_script_jobs(resume):
     assert policy["machineType"] == "n2-standard-8"
     runnables = config["taskGroups"][0]["taskSpec"]["runnables"]
     assert all("script" in runnable for runnable in runnables)
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_uv_bootstrap_runs_without_home(resume):
+    args = cloud_args()
+    args.resume = resume
+    # Execute the generated installer/PATH commands in a minimal Batch-like
+    # environment. Stub only the download: no network or installation writes.
+    bootstrap = batch.script(args).split(
+        "apt-get install -y -qq git curl ca-certificates\n", 1
+    )[1].split("git clone ", 1)[0]
+    installer = (
+        'printf "install_dir=%s\\n" "${UV_INSTALL_DIR-}"\n'
+        'printf "no_modify_path=%s\\n" "${UV_NO_MODIFY_PATH-}"\n'
+    )
+    harness = (
+        "set -Eeuo pipefail\n"
+        f"curl() {{ printf '%s\\n' {shlex.quote(installer)}; }}\n"
+        + bootstrap
+        + 'test "${HOME+x}" != x\n'
+        + 'test "${PATH%%:*}" = /tmp/uv-bin\n'
+        + 'printf "bootstrap-ok\\n"\n'
+    )
+    completed = subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc"], input=harness,
+        env={"PATH": "/usr/bin:/bin"}, text=True, capture_output=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines() == [
+        "install_dir=/tmp/uv-bin", "no_modify_path=1", "bootstrap-ok",
+    ]
 
 
 def test_cloud_access_errors_are_not_interpreted_as_absent_objects(monkeypatch):

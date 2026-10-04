@@ -69,8 +69,10 @@ cleanup() {{
 trap cleanup EXIT
 apt-get update -qq
 apt-get install -y -qq git curl ca-certificates
-curl -LsSf https://astral.sh/uv/install.sh | sh
-export PATH="$HOME/.local/bin:$PATH"
+# Batch script tasks may not define HOME. Use the same explicit uv install
+# directory as the training launchers, without modifying shell profiles.
+curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/tmp/uv-bin UV_NO_MODIFY_PATH=1 sh
+export PATH="/tmp/uv-bin:$PATH"
 git clone {q(SD_REPO)} "$SD_REPOSITORY"
 git -C "$SD_REPOSITORY" checkout --detach {q(args.repo_ref)}
 git clone {q(UCV_REPO)} "$UCV_REPOSITORY"
