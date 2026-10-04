@@ -63,6 +63,8 @@ One standard `n2-standard-8`, eight evaluation processes with one Torch/BLAS
 thread each, no GPU. A 200 GiB boot disk holds the read-only policy inputs;
 source model files are **not** re-uploaded as evaluation outputs. No automatic
 task retries. Source and output buckets are independent parameters.
+The VM image is left unspecified so Batch selects its supported default Debian
+image for script jobs, matching the existing SD-CFR launchers.
 
 The VM executes a short smoke across every comparison, then a timing pilot
 of 128 duplicate pairs for each of the 54 cells using the real full archives.
@@ -111,6 +113,8 @@ Batch JSON without cloud writes, or `resume` after a failed/interrupted job
 using the same `RUN_ID`, refs and sources. The launcher refuses simultaneous
 jobs using the same output prefix. To change implementation or protocol,
 choose a new output prefix; do not mix incompatible cached matches.
+If provisioning fails before evaluation starts and no evaluation manifest
+exists, use a new `RUN_ID` with `run`, not `resume`.
 
 ## Outputs and download
 

@@ -185,6 +185,20 @@ def test_cloud_plan_one_vm_and_only_playable_policy_inputs(tmp_path):
     with pytest.raises(ValueError): batch.job_config(args)
 
 
+@pytest.mark.parametrize("resume", [False, True])
+def test_cloud_plan_uses_batch_default_image_for_script_jobs(resume):
+    args = cloud_args()
+    args.resume = resume
+    config = batch.job_config(args)
+    policy = config["allocationPolicy"]["instances"][0]["policy"]
+    # Regression: the non-existent `batch-debian` family prevented VM creation.
+    # Preserve the requested disk without pinning an image name or family.
+    assert policy["bootDisk"] == {"sizeGb": 200, "type": "pd-balanced"}
+    assert policy["machineType"] == "n2-standard-8"
+    runnables = config["taskGroups"][0]["taskSpec"]["runnables"]
+    assert all("script" in runnable for runnable in runnables)
+
+
 def test_cloud_access_errors_are_not_interpreted_as_absent_objects(monkeypatch):
     args = cloud_args()
     monkeypatch.setattr(batch,"cloud",lambda *a,**k:SimpleNamespace(returncode=1,stdout="",stderr="Permission denied"))

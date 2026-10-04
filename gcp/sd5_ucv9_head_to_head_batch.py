@@ -122,11 +122,13 @@ sync_outputs
 
 def job_config(args):
     validate(args)
+    # Let Batch select its supported Debian image for script jobs, as in the
+    # existing SD-CFR launchers. `batch-debian` is a prefix, not an image family.
     return dict(taskGroups=[dict(taskCount=1, parallelism=1, taskSpec=dict(
         runnables=[dict(script=dict(text=script(args)))], computeResource=dict(cpuMilli=8000, memoryMib=30000),
         maxRetryCount=0, maxRunDuration=f"{int((args.max_hours + 2) * 3600)}s"))],
         allocationPolicy=dict(instances=[dict(policy=dict(machineType="n2-standard-8", provisioningModel="STANDARD",
-            bootDisk=dict(image="projects/batch-custom-image/global/images/family/batch-debian", sizeGb=200, type="pd-balanced")))],
+            bootDisk=dict(sizeGb=200, type="pd-balanced")))],
             serviceAccount=dict(email=args.service_account, scopes=["https://www.googleapis.com/auth/cloud-platform"])),
         logsPolicy=dict(destination="CLOUD_LOGGING"), labels=dict(workload="sd5-ucv9-h2h", run=args.run_id))
 
