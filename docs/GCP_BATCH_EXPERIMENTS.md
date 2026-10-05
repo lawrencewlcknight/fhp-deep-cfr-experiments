@@ -1,5 +1,24 @@
 # Running Experiment 1: FHP SD-CFR efficiency audit
 
+## Retrospective SD-CFR internal head-to-head league
+
+The evaluation-only internal league closes the outstanding SD-CFR comparisons
+without retraining. It evaluates Exp2 versus Exp3, Exp4 versus Exp5, Exp5 versus
+Exp6, and the saved Exp6/Exp7 candidates across all nine training-seed cells.
+See the [complete protocol, frozen sources, launch, resume and download guide](../experiments/fhp/retrospective_sd_cfr_internal_evaluation/README.md).
+
+```bash
+export PROJECT_ID="clever-overview-399515"
+export REGION="europe-west1"
+export BUCKET="gs://clever-overview-399515-fhp-deep-cfr-results"
+export SD_BUCKET="$BUCKET"
+export SA_EMAIL="fhp-deep-cfr-runner@clever-overview-399515.iam.gserviceaccount.com"
+export REPO_REF="FULL_PUSHED_COMMIT_SHA"
+export RUN_ID="fhp-sdcfr-h2h-$(date -u '+%Y%m%d-%H%M%S')"
+export EVAL_MAX_HOURS=12
+bash gcp/run_sd_cfr_internal_head_to_head.sh run
+```
+
 For **Experiment 4 (Experiment 3 on n2-standard-16)**, see its
 [configuration and launch guide](../experiments/fhp/exp4_sd_cfr_structured_n2_standard16/README.md).
 

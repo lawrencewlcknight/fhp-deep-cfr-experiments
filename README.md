@@ -2,6 +2,13 @@
 
 ## Shared policy evaluation
 
+A dedicated retrospective **SD-CFR internal league** evaluates the unresolved
+Exp2/Exp3 representation comparison, Exp4/Exp5 parallel-traversal comparison,
+Exp5/Exp6 repeatability, and Exp6/Exp7 final-policy selection. It uses all nine
+cross-seed cells, duplicate deals, both seats and the complete historical
+strategy mixtures, without retraining or LBR. See the
+[internal head-to-head specification](experiments/fhp/retrospective_sd_cfr_internal_evaluation/README.md).
+
 A dedicated evaluation-only job compares the saved **SD-CFR Experiment 5**
 and **UCV-ESCHER Experiment 9** policies across all nine seed combinations,
 at matched training times and two approximate node budgets. It retains the
