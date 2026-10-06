@@ -1,8 +1,10 @@
-"""Prespecified SD-CFR Exp5 versus UCV-ESCHER Exp9 cross-seed league.
+"""Prespecified SD-CFR versus UCV-ESCHER duration cross-seed league.
 
-The only SD-CFR deployment representation used here is the full uniform
-historical trajectory mixture. No LBR, fitting, archive thinning or retraining.
-The UCV repository is a separately pinned, read-only loader dependency.
+The 24-hour cohort compares SD-CFR Experiment 5 with UCV-ESCHER Experiment 10.
+The 48-hour cohort compares SD-CFR Experiment 6 with UCV-ESCHER Experiment 16,
+the exact continuation of Experiment 10. SD-CFR is always deployed as its full
+uniform historical trajectory mixture. There is no training, LBR, refitting or
+archive thinning. The UCV repository is a separately pinned read-only loader.
 """
 from __future__ import annotations
 
@@ -18,29 +20,46 @@ import math
 import multiprocessing
 from pathlib import Path
 import platform
+import shutil
 import sys
 import time
 
 import numpy as np
 
 SEEDS = (0, 1, 2)
-HOURS = (6, 12, 18, 24)
-# kind, SD-CFR hours, UCV hours, duplicate-deal pairs per cross-seed cell.
-COMPARISONS = (
-    ("primary", 24, 24, 100_000),
-    ("same_time", 6, 6, 50_000),
-    ("same_time", 12, 12, 50_000),
-    ("same_time", 18, 18, 50_000),
-    ("approximate_nodes", 6, 12, 50_000),
-    ("approximate_nodes", 12, 24, 50_000),
-)
+COHORT_HOURS = {"24h": (6, 12, 18, 24), "48h": tuple(range(6, 49, 6))}
+# comparison id, kind, SD hours, UCV hours, pairs per cross-seed cell, primary.
+COMPARISONS = {
+    "24h": (
+        ("primary_24h", "primary", 24, 24, 100_000, True),
+        ("same_time_06h", "same_time", 6, 6, 50_000, False),
+        ("same_time_12h", "same_time", 12, 12, 50_000, False),
+        ("same_time_18h", "same_time", 18, 18, 50_000, False),
+        ("nodes_sd06_ucv12", "approximate_nodes", 6, 12, 50_000, False),
+        ("nodes_sd12_ucv24", "approximate_nodes", 12, 24, 50_000, False),
+    ),
+    "48h": (
+        ("lineage_24h", "lineage_bridge", 24, 24, 50_000, False),
+        ("same_time_30h", "same_time", 30, 30, 50_000, False),
+        ("same_time_36h", "same_time", 36, 36, 50_000, False),
+        ("same_time_42h", "same_time", 42, 42, 50_000, False),
+        ("primary_48h", "primary", 48, 48, 100_000, True),
+        ("nodes_sd24_ucv48", "approximate_nodes", 24, 48, 50_000, False),
+    ),
+}
 SHARD_PAIRS = 5_000
-PROTOCOL = "fhp_sd5_ucv9_cross_seed_v1"
-SD_SOURCE_COMMIT = "e1118a1e1fd316d40f71c7c898868b5432873151"
-UCV_SOURCE_COMMIT = "3342ae096f81194f0d7a1c46fa5aec9fc26bb5ba"
-# Frozen production Exp9 configuration; avoids importing its conflicting
-# `experiments` package into this repository's Python namespace.
-UCV_CONFIG_SHA256 = "fcd04bd63c0a15ad81ec24d327f09c35c8a3a2ed1e8976b64d944e8cb88ae9db"
+PROTOCOL = "fhp_sd_ucv_duration_cross_seed_v2"
+SD_SOURCE_COMMITS = {"24h": "e1118a1e1fd316d40f71c7c898868b5432873151",
+                     "48h": "bb689252d6b322adb3de6102d095a49c3ed87250"}
+UCV_SOURCE_COMMIT = "e66d4da515eb212e5026a965ac5c39c86144c901"
+# Frozen Experiment 10 configuration, also used unchanged by Experiment 16.
+UCV_CONFIG_SHA256 = "065734572e18f4597dd8f494ea39230c1f193b9d68aa775138c4a8a3e39eddad"
+SOURCE_NAMES = {
+    "24h": {"sd": ("exp5_sd_cfr_parallel_24h", "parallel_structured_uniform_sd_cfr", "SD-CFR Exp5"),
+            "ucv": ("exp10_fhp_hand_board_features", "hand_board_cached_parallel_ucv_escher", "UCV-ESCHER Exp10")},
+    "48h": {"sd": ("exp6_sd_cfr_parallel_48h", "parallel_structured_uniform_sd_cfr_48h", "SD-CFR Exp6"),
+            "ucv": ("exp10_fhp_hand_board_features", "hand_board_cached_parallel_ucv_escher", "UCV-ESCHER Exp16")},
+}
 
 
 def digest(value):
@@ -94,12 +113,19 @@ def implementation_digest(ucv_repo):
     return digest({k: sha256(p) for k, p in sorted(files.items())})
 
 
-def validate_sources(sd_root, ucv_root, ucv_repo):
+def validate_sources(sd_root, ucv_root, ucv_repo, *, cohort, ucv_source10_root=None):
     from deep_cfr_poker.game import load_fhp_game, FHP_GAME_PARAMETERS
     from deep_cfr_poker.sd_cfr_disk import DiskArchiveReader, sha256
-    from experiments.fhp.exp5_sd_cfr_parallel_24h import config as sd_config
+    if cohort == "24h":
+        from experiments.fhp.exp5_sd_cfr_parallel_24h import config as sd_config
+    elif cohort == "48h":
+        from experiments.fhp.exp6_sd_cfr_parallel_48h import config as sd_config
+    else:
+        raise ValueError(f"Unknown cohort: {cohort}")
     loader = setup_ucv(ucv_repo)
+    from fhp_escher.hand_board_features import FHPHandBoardFeatureEncoder
     game = load_fhp_game()
+    hours = COHORT_HOURS[cohort]
     records, verified_chunks = [], {}
     for algorithm, root in (("sd", Path(sd_root)), ("ucv", Path(ucv_root))):
         workers = sorted((root / "workers").glob("task_*"))
@@ -111,14 +137,15 @@ def validate_sources(sd_root, ucv_root, ucv_repo):
             success = read_json(worker / "SUCCESS.json")
             if (worker / "FAILURE.json").exists() or manifest.get("smoke") is not False:
                 raise ValueError("Incomplete/smoke source worker")
-            expected_commit = SD_SOURCE_COMMIT if algorithm == "sd" else UCV_SOURCE_COMMIT
-            expected_name = "exp5_sd_cfr_parallel_24h" if algorithm == "sd" else "exp9_fhp_cached_parallel_24h"
-            expected_id = "parallel_structured_uniform_sd_cfr" if algorithm == "sd" else "cached_parallel_structured_ucv_escher"
+            expected_commit = SD_SOURCE_COMMITS[cohort] if algorithm == "sd" else UCV_SOURCE_COMMIT
+            expected_name, expected_id, label = SOURCE_NAMES[cohort][algorithm]
+            expected_encoder = (sd_config.FEATURE_ENCODER_METADATA if algorithm == "sd"
+                                else FHPHandBoardFeatureEncoder().metadata())
             if (manifest.get("repository_commit") != expected_commit
                     or manifest.get("experiment_name") != expected_name
                     or manifest.get("algorithm_id") != expected_id
                     or manifest.get("game", {}).get("parameters") != dict(FHP_GAME_PARAMETERS)
-                    or manifest.get("feature_encoder") != sd_config.FEATURE_ENCODER_METADATA
+                    or manifest.get("feature_encoder") != expected_encoder
                     or manifest.get("reference_vm", {}).get("machine_type") != "n2-standard-16"):
                 raise ValueError(f"Unexpected source experiment/game/encoder/VM: {worker}")
             seed = int(manifest["seed"])
@@ -127,7 +154,7 @@ def validate_sources(sd_root, ucv_root, ucv_repo):
             if algorithm == "sd":
                 if (digest(manifest["config"]) != digest(sd_config.solver_config())
                         or manifest.get("execution") != sd_config.execution_config(seed)
-                        or success.get("checkpoints") != 4):
+                        or success.get("checkpoints") != len(hours)):
                     raise ValueError("Unexpected SD-CFR training contract")
             else:
                 if (digest(manifest["training_config"]) != UCV_CONFIG_SHA256
@@ -138,7 +165,7 @@ def validate_sources(sd_root, ucv_root, ucv_repo):
                         or runtime.get("traversal_execution") != "ray_parallel"):
                     raise ValueError("Unexpected UCV execution contract")
             rows = read_json(worker / "checkpoint_manifest.json")
-            if sorted(r["checkpoint_target_hours"] for r in rows) != list(HOURS):
+            if sorted(int(r["checkpoint_target_hours"]) for r in rows) != list(hours):
                 raise ValueError("Missing/duplicate checkpoint schedule")
             for row in rows:
                 path = contained(worker, row["path"])
@@ -179,43 +206,97 @@ def validate_sources(sd_root, ucv_root, ucv_repo):
                     if any(json.loads(json.dumps(payload.get(k))) != json.loads(json.dumps(v))
                            for k, v in expected.items()):
                         raise ValueError("UCV checkpoint metadata mismatch")
-                records.append(dict(algorithm=algorithm, seed=seed, training_hours=hour,
+                records.append(dict(algorithm=algorithm, source_experiment=label, cohort=cohort,
+                                    seed=seed, training_hours=hour,
                                     active_seconds=elapsed, nodes_touched=int(row["nodes_touched"]),
                                     outer_iteration=int(row["outer_iteration"]), path=str(path), sha256=row["sha256"],
                                     source_commit=expected_commit,
                                     run_manifest_sha256=sha256(worker / "run_manifest.json"),
-                                    checkpoint_manifest_sha256=sha256(worker / "checkpoint_manifest.json")))
+                                    checkpoint_manifest_sha256=sha256(worker / "checkpoint_manifest.json"),
+                                    continuation_source_sha256="", source10_run_manifest_sha256="",
+                                    source10_checkpoint_manifest_sha256="", source10_success_sha256=""))
             ordered = sorted((r for r in records if r["algorithm"] == algorithm and r["seed"] == seed),
                              key=lambda r: r["training_hours"])
             for earlier, later in zip(ordered, ordered[1:]):
                 if any(later[key] <= earlier[key] for key in ("nodes_touched", "outer_iteration", "active_seconds")):
                     raise ValueError("Source training trajectory does not advance between checkpoints")
-    validate_index(records)
+    validate_index(records, cohort)
+    if cohort == "48h":
+        validate_ucv_continuation(Path(ucv_root), Path(ucv_source10_root) if ucv_source10_root else None,
+                                  records)
     return records
 
 
-def validate_index(records):
+def validate_ucv_continuation(continued_root, source_root, records):
+    """Prove Exp16 is the recorded Exp10 continuation and preserves 6--24h."""
+    from deep_cfr_poker.sd_cfr_disk import sha256
+    if source_root is None:
+        raise ValueError("The 48h cohort requires Experiment 10 lineage metadata")
+    continued = {(r["seed"], r["training_hours"]): r for r in records if r["algorithm"] == "ucv"}
+    for seed in SEEDS:
+        source_worker = source_root / "workers" / f"task_{seed:03d}_hand_board_cached_parallel_ucv_escher_seed_{seed}"
+        destination = continued_root / "workers" / f"task_{seed:03d}_hand_board_cached_parallel_ucv_escher_seed_{seed}"
+        source_manifest = read_json(source_worker / "run_manifest.json")
+        source_rows = read_json(source_worker / "checkpoint_manifest.json")
+        source_success = read_json(source_worker / "SUCCESS.json")
+        lineage = read_json(destination / "continuation_source.json")
+        provenance = dict(continuation_source_sha256=sha256(destination / "continuation_source.json"),
+                          source10_run_manifest_sha256=sha256(source_worker / "run_manifest.json"),
+                          source10_checkpoint_manifest_sha256=sha256(source_worker / "checkpoint_manifest.json"),
+                          source10_success_sha256=sha256(source_worker / "SUCCESS.json"))
+        for record in (r for r in records if r["algorithm"] == "ucv" and r["seed"] == seed):
+            record.update(provenance)
+        if (source_manifest.get("repository_commit") != UCV_SOURCE_COMMIT
+                or source_manifest.get("experiment_name") != SOURCE_NAMES["24h"]["ucv"][0]
+                or source_manifest.get("seed") != seed):
+            raise ValueError("Invalid Experiment 10 lineage source")
+        final = source_rows[-1]
+        expected = dict(seed=seed, source_total_hours=24, total_hours=48,
+                        source_commit=UCV_SOURCE_COMMIT,
+                        source_state_path=final.get("training_state_path"),
+                        source_state_sha256=final.get("training_state_sha256"),
+                        source_summary_sha256=source_success.get("summary_sha256"))
+        if any(lineage.get(k) != v for k, v in expected.items()):
+            raise ValueError(f"Invalid Experiment 10 continuation lineage: seed {seed}")
+        if not lineage.get("source_worker", "").endswith(
+                f"/exp10-features-20261001-161740/workers/{source_worker.name}"):
+            raise ValueError("Experiment 16 used a different source cohort")
+        for row in source_rows:
+            hour = int(row["checkpoint_target_hours"])
+            if hour > 24:
+                continue
+            record = continued[(seed, hour)]
+            if (record["sha256"] != row["sha256"]
+                    or record["nodes_touched"] != int(row["nodes_touched"])
+                    or record["outer_iteration"] != int(row["outer_iteration"])):
+                raise ValueError("Experiment 16 did not preserve Exp10 6--24h policies byte-for-byte")
+        if continued[(seed, 48)]["outer_iteration"] <= continued[(seed, 24)]["outer_iteration"]:
+            raise ValueError("Experiment 16 contains no training after 24h")
+
+
+def validate_index(records, cohort):
     if sorted((r["algorithm"], r["seed"], r["training_hours"]) for r in records) != list(
-            itertools.product(("sd", "ucv"), SEEDS, HOURS)):
-        raise ValueError("Expected both algorithms, three distinct seeds, four checkpoints")
+            itertools.product(("sd", "ucv"), SEEDS, COHORT_HOURS[cohort])):
+        raise ValueError("Expected both algorithms, three distinct seeds and the complete cohort schedule")
 
 
-def build_tasks(records, implementation, *, stage="production"):
-    validate_index(records)
+def build_tasks(records, implementation, *, cohort, stage="production"):
+    validate_index(records, cohort)
     if stage not in {"production", "profile", "smoke"}:
         raise ValueError(stage)
     index = {(r["algorithm"], r["seed"], r["training_hours"]): r for r in records}
     tasks = []
-    for comparison, (kind, sd_hour, ucv_hour, deals) in enumerate(COMPARISONS):
+    for comparison, (comparison_id, kind, sd_hour, ucv_hour, deals, primary) in enumerate(COMPARISONS[cohort]):
         total = deals if stage == "production" else (128 if stage == "profile" else 2)
         for a, b in itertools.product(SEEDS, repeat=2):
-            cell = f"{kind}_sd{sd_hour:02d}_ucv{ucv_hour:02d}_s{a}_u{b}"
+            cell = f"{comparison_id}_s{a}_u{b}"
             for shard, start in enumerate(range(0, total, SHARD_PAIRS)):
                 # Independent streams across cells and shards; paired chance
                 # within each seat-swapped pair. Probe streams never enter results.
                 seed = int(np.random.SeedSequence([915039, comparison, a, b, shard,
                            {"production": 0, "profile": 1, "smoke": 2}[stage]]).generate_state(1)[0])
-                tasks.append(dict(task_id=f"{cell}_{shard:03d}", cell_id=cell, kind=kind,
+                tasks.append(dict(task_id=f"{cell}_{shard:03d}", cell_id=cell,
+                                  comparison_id=comparison_id, kind=kind, primary=primary, cohort=cohort,
                                   sd=index["sd", a, sd_hour], ucv=index["ucv", b, ucv_hour],
                                   num_deals=min(SHARD_PAIRS, total - start), evaluation_seed=seed,
                                   stage=stage, protocol=PROTOCOL, implementation=implementation))
@@ -258,7 +339,8 @@ def execute_task(task):
     a, b = loaded_policy(task["sd"], game), loaded_policy(task["ucv"], game)
     result = evaluate_duplicate_match(game, a, b, num_deals=task["num_deals"],
                                       seed=task["evaluation_seed"], seed_layout="split",
-                                      policy_a_name="SD-CFR Exp5", policy_b_name="UCV-ESCHER Exp9").to_dict()
+                                      policy_a_name=task["sd"]["source_experiment"],
+                                      policy_b_name=task["ucv"]["source_experiment"]).to_dict()
     row = dict(task=portable(task), result=result, elapsed_seconds=time.perf_counter() - started)
     row["result_sha256"] = digest(row)
     return row
@@ -349,14 +431,15 @@ def pool_shards(rows):
                 sd_as_player1_mean_mbb=10*sum(r["result"]["num_deal_pairs"] * r["result"]["policy_a_player1_mean_chips"] for r in rows)/n)
 
 
-def cluster_interval(matrix, *, draws=10_000, seed=590031):
+def cluster_interval(matrix, *, draws=10_000, seed=590031, confidence=.95):
     matrix = np.asarray(matrix, dtype=float)
     if matrix.shape != (3, 3) or not np.isfinite(matrix).all():
         raise ValueError("Bootstrap requires the complete 3x3 training-seed matrix")
     rng = np.random.default_rng(seed)
     a, b = rng.integers(0, 3, (draws, 3)), rng.integers(0, 3, (draws, 3))
     means = matrix[a[:, :, None], b[:, None, :]].mean(axis=(1, 2))
-    return tuple(float(x) for x in np.quantile(means, (.025, .975)))
+    tail = (1 - confidence) / 2
+    return tuple(float(x) for x in np.quantile(means, (tail, 1-tail)))
 
 
 def write_csv(path, rows):
@@ -366,22 +449,25 @@ def write_csv(path, rows):
         writer.writerows(rows)
 
 
-def report(results, output):
+def report(results, output, *, cohort):
     from deep_cfr_poker.sd_cfr_disk import write_json
     output = Path(output)
+    output.mkdir(parents=True, exist_ok=True)
     cells = []
     for cell in sorted({r["task"]["cell_id"] for r in results}):
         rows = [r for r in results if r["task"]["cell_id"] == cell]
         t = rows[0]["task"]
-        cells.append(dict(cell_id=cell, kind=t["kind"], sd_hours=t["sd"]["training_hours"],
+        cells.append(dict(cell_id=cell, comparison_id=t["comparison_id"], kind=t["kind"],
+                          primary=t["primary"], cohort=cohort, sd_hours=t["sd"]["training_hours"],
                           ucv_hours=t["ucv"]["training_hours"], sd_seed=t["sd"]["seed"], ucv_seed=t["ucv"]["seed"],
                           sd_nodes=t["sd"]["nodes_touched"], ucv_nodes=t["ucv"]["nodes_touched"],
                           sd_active_seconds=t["sd"]["active_seconds"], ucv_active_seconds=t["ucv"]["active_seconds"],
                           relative_node_excess_sd=t["sd"]["nodes_touched"]/t["ucv"]["nodes_touched"]-1,
                           **pool_shards(rows)))
     summaries = []
-    for kind, a, b, pairs in COMPARISONS:
-        rows = [r for r in cells if r["kind"] == kind and r["sd_hours"] == a and r["ucv_hours"] == b]
+    matrices = {}
+    for comparison_id, kind, a, b, pairs, primary in COMPARISONS[cohort]:
+        rows = [r for r in cells if r["comparison_id"] == comparison_id]
         if sorted((r["sd_seed"], r["ucv_seed"]) for r in rows) != list(itertools.product(SEEDS, repeat=2)):
             raise ValueError("Incomplete comparison; refusing aggregate")
         if any(r["duplicate_pairs"] != pairs for r in rows):
@@ -390,8 +476,13 @@ def report(results, output):
         for r in rows:
             matrix[r["sd_seed"], r["ucv_seed"]] = r["mean_mbb_per_hand"]
         lo, hi = cluster_interval(matrix)
-        summaries.append(dict(kind=kind, sd_hours=a, ucv_hours=b,
+        simultaneous_lo, simultaneous_hi = cluster_interval(matrix, confidence=.975)
+        matrices[comparison_id] = matrix
+        summaries.append(dict(comparison_id=comparison_id, cohort=cohort, kind=kind, primary=primary,
+                              sd_hours=a, ucv_hours=b,
                               mean_mbb_per_hand=float(matrix.mean()), cluster_ci95_low=lo, cluster_ci95_high=hi,
+                              family_ci97_5_low=simultaneous_lo if primary else "",
+                              family_ci97_5_high=simultaneous_hi if primary else "",
                               conditional_mc_se_mbb=math.sqrt(sum(r["mc_se_mbb_per_hand"]**2 for r in rows))/9,
                               positive_cells=int((matrix > 0).sum()), cross_seed_cells=9,
                               sd_nodes_mean=float(np.mean([r["sd_nodes"] for r in rows])),
@@ -401,18 +492,29 @@ def report(results, output):
                               duplicate_pairs=sum(r["duplicate_pairs"] for r in rows)))
     write_csv(output / "matchups.csv", cells)
     write_csv(output / "comparison_summary.csv", summaries)
-    write_json(output / "summary.json", dict(comparisons=summaries, units="mbb/hand", positive_favours="SD-CFR Exp5",
+    margin_change = None
+    if cohort == "48h":
+        change = matrices["primary_48h"] - matrices["lineage_24h"]
+        lo, hi = cluster_interval(change, seed=590032)
+        margin_change = dict(comparison_id="cross_play_margin_change_24h_to_48h",
+                             mean_mbb_per_hand=float(change.mean()), cluster_ci95_low=lo,
+                             cluster_ci95_high=hi,
+                             interpretation=("Change in the SD-minus-UCV cross-play margin along the Exp6/Exp16 "
+                                             "lineages; not a universal or causal learning-speed estimate."))
+    write_json(output / "summary.json", dict(protocol=PROTOCOL, cohort=cohort, comparisons=summaries,
+        cross_play_margin_change=margin_change, units="mbb/hand", positive_favours="SD-CFR",
         inference="Exploratory pointwise percentile bootstrap: 10,000 independent row/column training-seed resamples; three seeds per method, not nine independent runs.",
+        primary_family_inference="The two prespecified primary endpoints also receive Bonferroni-compatible 97.5% cluster intervals; aggregation reports them together.",
         uncertainty="Cluster intervals condition on estimated matchup means; independent Monte Carlo SE is reported separately, not added to bootstrap variance.",
         caveats=["Head-to-head value is not exploitability or proof of convergence.",
-                 "Historical selected cohorts; no multiplicity-adjusted confirmatory claim.",
+                 "Historical selected cohorts with only three training seeds per method.",
                  "Active-time clocks differ: UCV excludes policy fitting; SD archive/deployment costs differ.",
                  "Node matches are approximate and algorithm node definitions need not imply equal computation."]))
-    plots(cells, summaries, output)
+    plots(cells, summaries, output, cohort=cohort)
     return summaries
 
 
-def plots(cells, summaries, output):
+def plots(cells, summaries, output, *, cohort):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -427,11 +529,13 @@ def plots(cells, summaries, output):
         ax.text(j, i, f"{v:.2f}", ha="center", va="center", color="black",
                 bbox=dict(facecolor="white", alpha=.8, edgecolor="none"))
     ax.set(xticks=SEEDS, yticks=SEEDS, xlabel="UCV-ESCHER training seed", ylabel="SD-CFR training seed",
-           title="24-hour saved policies: SD-CFR minus UCV-ESCHER")
+           title=f"{cohort[:-1]}-hour saved policies: SD-CFR minus UCV-ESCHER")
     fig.colorbar(im, ax=ax, label="mbb/hand (positive favours SD-CFR)")
-    fig.tight_layout(); fig.savefig(output / "final_head_to_head_heatmap.png", dpi=180); plt.close(fig)
+    fig.tight_layout(); fig.savefig(output / f"primary_{cohort}_heatmap.png", dpi=180); plt.close(fig)
     for node_view in (False, True):
-        rows = sorted([r for r in summaries if (r["kind"] == "approximate_nodes") == node_view], key=lambda r:r["sd_hours"])
+        rows = sorted([r for r in summaries if ((r["kind"] == "approximate_nodes") == node_view)
+                       and (node_view or r["kind"] in {"primary", "same_time", "lineage_bridge"})],
+                      key=lambda r:r["sd_hours"])
         x = np.arange(len(rows)) if node_view else np.array([r["sd_hours"] for r in rows])
         means = [r["mean_mbb_per_hand"] for r in rows]
         fig, ax = plt.subplots(figsize=(7, 4.5))
@@ -443,24 +547,93 @@ def plots(cells, summaries, output):
             ax.set_xticks(x, [f"SD {r['sd_hours']}h vs UCV {r['ucv_hours']}h\n{r['sd_nodes_mean']/1e6:.1f}m vs {r['ucv_nodes_mean']/1e6:.1f}m nodes" for r in rows])
             ax.set_xlabel("Approximate node matches (not equal compute)")
         else:
-            ax.set(xticks=HOURS, xlabel="Nominal active training hours (different clock exclusions)")
-        fig.tight_layout(); fig.savefig(output / ("approximate_nodes.png" if node_view else "head_to_head_by_training_time.png"), dpi=180); plt.close(fig)
+            ax.set(xticks=sorted({r["sd_hours"] for r in rows}),
+                   xlabel="Nominal active training hours (different clock exclusions)")
+        name = f"approximate_nodes_{cohort}.png" if node_view else f"head_to_head_by_training_time_{cohort}.png"
+        fig.tight_layout(); fig.savefig(output / name, dpi=180); plt.close(fig)
+
+
+def aggregate(stage24, stage48, output):
+    """Combine complete cohort reports without touching policy inputs."""
+    from deep_cfr_poker.sd_cfr_disk import sha256, write_json
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    sources = {}
+    rows = []
+    for cohort, directory in (("24h", Path(stage24)), ("48h", Path(stage48))):
+        success = read_json(directory / "SUCCESS.json")
+        summary = read_json(directory / "summary.json")
+        if success.get("status") != "complete" or summary.get("protocol") != PROTOCOL or summary.get("cohort") != cohort:
+            raise ValueError(f"Incomplete or incompatible {cohort} stage")
+        sources[cohort] = dict(success_sha256=sha256(directory / "SUCCESS.json"),
+                               manifest_sha256=sha256(directory / "evaluation_manifest.json"))
+        rows.extend(summary["comparisons"])
+        for path in directory.glob("*.png"):
+            shutil.copy2(path, output / path.name)
+    primary = [r for r in rows if r["primary"]]
+    if {r["comparison_id"] for r in primary} != {"primary_24h", "primary_48h"}:
+        raise ValueError("Expected exactly the two prespecified primary endpoints")
+    stage48_summary = read_json(Path(stage48) / "summary.json")
+    write_csv(output / "comparison_summary.csv", rows)
+    combined = dict(protocol=PROTOCOL, status="complete", units="mbb/hand",
+                    positive_favours="SD-CFR", primary_endpoints=primary, comparisons=rows,
+                    cross_play_margin_change=stage48_summary["cross_play_margin_change"],
+                    family_inference=("Pointwise 95% intervals are exploratory. The two primary endpoints also "
+                                      "have Bonferroni-compatible 97.5% training-seed cluster intervals."),
+                    sources=sources,
+                    caveats=stage48_summary["caveats"])
+    write_json(output / "summary.json", combined)
+    lines = ["# SD-CFR versus UCV-ESCHER duration evaluation", "",
+             "Positive values favour SD-CFR. All values are mbb/hand.", "",
+             "## Prespecified primary endpoints", "",
+             "| Endpoint | Mean | Pointwise 95% CI | Family-compatible 97.5% CI |",
+             "|---|---:|---:|---:|"]
+    for row in sorted(primary, key=lambda r: r["sd_hours"]):
+        lines.append(f"| {row['sd_hours']}h equal active time | {row['mean_mbb_per_hand']:.3f} | "
+                     f"[{row['cluster_ci95_low']:.3f}, {row['cluster_ci95_high']:.3f}] | "
+                     f"[{row['family_ci97_5_low']:.3f}, {row['family_ci97_5_high']:.3f}] |")
+    change = combined["cross_play_margin_change"]
+    lines += ["", "## Change along the 48-hour lineages", "",
+              f"The SD-minus-UCV margin changed by **{change['mean_mbb_per_hand']:.3f} mbb/hand** "
+              f"from 24h to 48h (95% CI [{change['cluster_ci95_low']:.3f}, "
+              f"{change['cluster_ci95_high']:.3f}]).", "",
+              change["interpretation"], "",
+              "Equal active time is not equal node exposure. Consult `comparison_summary.csv` for the "
+              "prespecified approximate-node comparisons and actual checkpoint node counts.", ""]
+    (output / "analysis_summary.md").write_text("\n".join(lines))
+    write_json(output / "SUCCESS.json", dict(status="complete", protocol=PROTOCOL,
+               duplicate_pairs=sum(r["duplicate_pairs"] for r in rows), sources=sources))
+    return combined
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--sd-root", type=Path, required=True)
-    parser.add_argument("--ucv-root", type=Path, required=True)
-    parser.add_argument("--ucv-repo", type=Path, required=True)
+    parser.add_argument("--sd-root", type=Path)
+    parser.add_argument("--ucv-root", type=Path)
+    parser.add_argument("--ucv-source10-root", type=Path,
+                        help="Small Exp10 metadata tree used to prove Exp16 lineage")
+    parser.add_argument("--ucv-repo", type=Path)
+    parser.add_argument("--cohort", choices=tuple(COHORT_HOURS))
     parser.add_argument("--sd-source-uri", help="Original cloud run prefix, recorded for provenance")
     parser.add_argument("--ucv-source-uri", help="Original cloud run prefix, recorded for provenance")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--stage-24", type=Path)
+    parser.add_argument("--stage-48", type=Path)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--max-hours", type=float, default=12)
-    parser.add_argument("--stage", choices=("smoke", "profile", "run"), default="run")
+    parser.add_argument("--stage", choices=("smoke", "profile", "run", "aggregate"), default="run")
     args = parser.parse_args()
-    if not 1 <= args.workers <= 8 or not 0 < args.max_hours <= 12:
-        parser.error("Use 1–8 workers and an evaluation limit up to 12 hours")
+    if args.stage == "aggregate":
+        if not args.stage_24 or not args.stage_48:
+            parser.error("Aggregation requires --stage-24 and --stage-48")
+        aggregate(args.stage_24, args.stage_48, args.output)
+        return
+    if not all((args.sd_root, args.ucv_root, args.ucv_repo, args.cohort)):
+        parser.error("Evaluation requires --sd-root, --ucv-root, --ucv-repo and --cohort")
+    if args.cohort == "48h" and not args.ucv_source10_root:
+        parser.error("The 48h cohort requires --ucv-source10-root")
+    if not 1 <= args.workers <= 8 or not 0 < args.max_hours <= 24:
+        parser.error("Use 1–8 workers and an evaluation limit up to 24 hours")
     for source in (args.sd_root, args.ucv_root, args.ucv_repo):
         if args.output.resolve().is_relative_to(source.resolve()) or source.resolve().is_relative_to(args.output.resolve()):
             parser.error("Output and source paths must be disjoint")
@@ -468,16 +641,19 @@ def main():
     torch.set_num_threads(1)
     from deep_cfr_poker.sd_cfr_disk import write_json
     args.output.mkdir(parents=True, exist_ok=True)
-    records = validate_sources(args.sd_root, args.ucv_root, args.ucv_repo)
+    records = validate_sources(args.sd_root, args.ucv_root, args.ucv_repo, cohort=args.cohort,
+                               ucv_source10_root=args.ucv_source10_root)
     implementation = implementation_digest(args.ucv_repo)
-    tasks = build_tasks(records, implementation)
+    tasks = build_tasks(records, implementation, cohort=args.cohort)
     environment = dict(python=platform.python_version(), **{k: version(k) for k in ("torch", "numpy", "open_spiel")})
-    manifest = dict(protocol=PROTOCOL, sources=portable(records), tasks_sha256=digest(portable(tasks)),
+    manifest = dict(protocol=PROTOCOL, cohort=args.cohort, sources=portable(records),
+                    tasks_sha256=digest(portable(tasks)),
                     implementation_sha256=implementation, environment=environment,
                     duplicate_pairs=sum(t["num_deals"] for t in tasks), workers=args.workers,
                     source_uris=dict(sd=args.sd_source_uri, ucv=args.ucv_source_uri),
-                    comparisons=[dict(kind=k, sd_hours=a, ucv_hours=b, duplicate_pairs_per_cell=n)
-                                 for k,a,b,n in COMPARISONS], seed_layout="split",
+                    comparisons=[dict(comparison_id=i, kind=k, sd_hours=a, ucv_hours=b,
+                                      duplicate_pairs_per_cell=n, primary=p)
+                                 for i,k,a,b,n,p in COMPARISONS[args.cohort]], seed_layout="split",
                     policy_representations=dict(sd="full_uniform_historical_trajectory_mixture",
                                                 ucv="saved_deployed_average_policy_network"))
     file = args.output / "evaluation_manifest.json"
@@ -486,7 +662,8 @@ def main():
     write_json(file, manifest)
     write_csv(args.output / "checkpoint_index.csv", portable(records))
     if args.stage == "smoke":
-        run_tasks(build_tasks(records, implementation, stage="smoke"), args.output / "smoke_tasks",
+        run_tasks(build_tasks(records, implementation, cohort=args.cohort, stage="smoke"),
+                  args.output / "smoke_tasks",
                   workers=args.workers, ucv_repo=args.ucv_repo)
         write_json(args.output / "SMOKE_SUCCESS.json", dict(passed=True, tested_cells=54))
         return
@@ -494,7 +671,7 @@ def main():
     # Re-profile after a VM restart; throughput on a previous host is not a
     # substitute for a real pilot here. These are not included in match results.
     probe_dir = args.output / "profile_tasks" / str(time.time_ns())
-    probes = run_tasks(build_tasks(records, implementation, stage="profile"), probe_dir,
+    probes = run_tasks(build_tasks(records, implementation, cohort=args.cohort, stage="profile"), probe_dir,
                        workers=args.workers, ucv_repo=args.ucv_repo)
     task_dir = args.output / "task_results"
     remaining = []
@@ -514,7 +691,7 @@ def main():
         return
     results = run_tasks(tasks, task_dir, workers=args.workers, ucv_repo=args.ucv_repo,
                         deadline=started + args.max_hours * 3600)
-    report(results, args.output)
+    report(results, args.output, cohort=args.cohort)
     write_json(args.output / "SUCCESS.json", dict(status="complete", protocol=PROTOCOL,
                duplicate_pairs=sum(t["num_deals"] for t in tasks), shards=len(results),
                evaluation_manifest_sha256=digest(manifest)))

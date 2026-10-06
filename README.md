@@ -9,12 +9,12 @@ cross-seed cells, duplicate deals, both seats and the complete historical
 strategy mixtures, without retraining or LBR. See the
 [internal head-to-head specification](experiments/fhp/retrospective_sd_cfr_internal_evaluation/README.md).
 
-A dedicated evaluation-only job compares the saved **SD-CFR Experiment 5**
-and **UCV-ESCHER Experiment 9** policies across all nine seed combinations,
-at matched training times and two approximate node budgets. It retains the
-full SD-CFR historical mixture, omits LBR, and includes a timing gate and
-resumable result shards. See the
-[cross-algorithm head-to-head specification](experiments/fhp/retrospective_sd5_ucv9_evaluation/README.md).
+A dedicated evaluation-only workflow compares **SD-CFR Experiment 5 with
+UCV-ESCHER Experiment 10 at 24 hours**, and **SD-CFR Experiment 6 with
+UCV-ESCHER Experiment 16 at 48 hours**. It evaluates all nine cross-seed cells,
+equal-time trajectories and prespecified approximate-node budgets while
+retaining the full SD-CFR historical mixtures. See the
+[cross-algorithm duration specification](experiments/fhp/retrospective_sd_ucv_duration_evaluation/README.md).
 
 Conventional FHP snapshots use the shared `fhp-evaluation-suite` API. A pinned
 snapshot of that evaluator is bundled for reproducible cloud runs; its

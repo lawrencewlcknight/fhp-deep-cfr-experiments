@@ -1,5 +1,27 @@
 # Running Experiment 1: FHP SD-CFR efficiency audit
 
+## SD-CFR versus UCV-ESCHER duration evaluation
+
+The evaluation-only cross-algorithm experiment compares SD-CFR Exp5 with
+UCV-ESCHER Exp10 at 24 active hours and SD-CFR Exp6 with the exact Exp10
+continuation, UCV-ESCHER Exp16, at 48 active hours. It also includes fixed
+equal-time trajectories, same-lineage 24h/48h change analysis and approximate
+node matches. See the [complete protocol, source validation, launch, resume and
+download guide](../experiments/fhp/retrospective_sd_ucv_duration_evaluation/README.md).
+
+```bash
+export PROJECT_ID="clever-overview-399515"
+export REGION="europe-west1"
+export BUCKET="gs://clever-overview-399515-fhp-deep-cfr-results"
+export SD_BUCKET="$BUCKET"
+export UCV_BUCKET="gs://clever-overview-399515-fhp-escher-results"
+export SA_EMAIL="fhp-deep-cfr-runner@clever-overview-399515.iam.gserviceaccount.com"
+export REPO_REF="FULL_PUSHED_COMMIT_SHA"
+export RUN_ID="fhp-sd-ucv-duration-$(date -u '+%Y%m%d-%H%M%S')"
+export EVAL_MAX_HOURS=12
+bash gcp/run_sd_ucv_duration_head_to_head.sh run
+```
+
 ## Retrospective SD-CFR internal head-to-head league
 
 The evaluation-only internal league closes the outstanding SD-CFR comparisons
