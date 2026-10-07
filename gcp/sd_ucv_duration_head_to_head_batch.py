@@ -182,7 +182,11 @@ def job_config(args, stage):
         disk = 200 if stage == "eval24" else 300
         seconds = int((args.max_hours + 2) * 3600)
     elif stage == "aggregate":
-        script, machine, cpu, memory, disk, seconds = aggregate_script(args), "e2-small", 1000, 3000, 30, 14400
+        # The aggregation process is allowed 3,000 MiB, so it cannot run on an
+        # e2-small (2,048 MiB). Batch rejects that resource combination before
+        # creating the job. Keep the memory allowance and use the next machine
+        # size so completed evaluation stages can be aggregated on resume.
+        script, machine, cpu, memory, disk, seconds = aggregate_script(args), "e2-medium", 1000, 3000, 30, 14400
     else:
         raise ValueError(stage)
     return dict(taskGroups=[dict(taskCount=1, parallelism=1, taskSpec=dict(
@@ -236,7 +240,11 @@ def submit(args, stage, *, tag=""):
     with tempfile.TemporaryDirectory(prefix="sd-ucv-duration-submit-") as temporary:
         file = Path(temporary) / "job.json"
         file.write_text(json.dumps(job_config(args, stage)))
-        cloud(args, "batch", "jobs", "submit", name, "--location", args.region, "--config", str(file))
+        # Stream gcloud diagnostics into the Batch controller log. Capturing
+        # stderr here previously reduced a submission failure to an opaque
+        # CalledProcessError traceback.
+        cloud(args, "batch", "jobs", "submit", name, "--location", args.region,
+              "--config", str(file), capture=False)
     return name
 
 

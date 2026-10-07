@@ -213,6 +213,27 @@ def test_cloud_plan_two_evaluators_and_only_playable_policy_inputs(tmp_path):
     with pytest.raises(ValueError): batch.validate(args)
 
 
+def test_aggregate_job_uses_vm_large_enough_for_requested_memory():
+    config = batch.job_config(cloud_args(), "aggregate")
+    policy = config["allocationPolicy"]["instances"][0]["policy"]
+    resources = config["taskGroups"][0]["taskSpec"]["computeResource"]
+    assert policy["machineType"] == "e2-medium"
+    assert resources == {"cpuMilli": 1000, "memoryMib": 3000}
+
+
+def test_submit_streams_gcloud_failure_details(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_cloud(args, *command, **kwargs):
+        calls.append((command, kwargs))
+
+    monkeypatch.setattr(batch, "cloud", fake_cloud)
+    batch.submit(cloud_args(), "aggregate")
+    command, kwargs = calls[-1]
+    assert command[:4] == ("batch", "jobs", "submit", "sd-ucv-duration-test-aggregate")
+    assert kwargs["capture"] is False
+
+
 @pytest.mark.parametrize("resume", [False, True])
 def test_cloud_plan_uses_batch_default_image_for_script_jobs(resume):
     args = cloud_args()
