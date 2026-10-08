@@ -70,6 +70,12 @@ a 200 GiB disk; the larger 48h stage has 300 GiB. After both stages succeed, a
 small aggregation job produces the combined report. No source policy files are
 uploaded as outputs.
 
+All stages use bounded package-install retries during VM startup: up to 30
+attempts per apt command, with a 10-second dpkg-lock wait and a 10-second pause
+between failures. This handles contention with unattended upgrades without
+deleting locks or stopping the updater. Persistent failures retain their exit
+status and are logged; the controller identifies the failed child job and state.
+
 After committing and pushing the implementation:
 
 ```bash
@@ -102,6 +108,14 @@ bash gcp/run_sd_ucv_duration_head_to_head.sh resume
 Resumption checksum-validates and reuses completed 5,000-pair shards. A
 completed cohort is not rerun. Changing code, sources or protocol requires a
 new `RUN_ID`.
+
+Exception for the October 2026 startup-lock repair: the change is confined to
+the Batch launcher, not the evaluation implementation or scientific identity.
+After committing and pushing this repair, set `REPO_REF` to that full SD-CFR
+commit and retain `RUN_ID=fhp-sd-ucv-duration-20261006-193151`, the original
+source runs and `UCV_REPO_REF`. Run the `resume` command above. Both cohort
+completion markers already exist, so only a new controller and aggregation job
+are submitted; the completed 6.3 million duplicate pairs are not replayed.
 
 ## Outputs
 

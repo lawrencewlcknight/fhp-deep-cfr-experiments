@@ -53,6 +53,30 @@ def environment(args):
     return "\n".join(f"export {key}={q(value)}" for key, value in values.items())
 
 
+def apt_bootstrap():
+    # Native waiting covers dpkg locks; retries also cover apt's list lock.
+    # Never delete lock files or interrupt the VM's unattended upgrader.
+    return '''apt_with_retry() {
+  local attempt result
+  for attempt in {1..30}; do
+    if apt-get -o DPkg::Lock::Timeout=10 "$@"; then
+      return 0
+    else
+      result=$?
+    fi
+    if [[ "$attempt" -eq 30 ]]; then
+      echo "apt-get $* failed after 30 attempts (exit $result)" >&2
+      return "$result"
+    fi
+    echo "apt-get $* failed (attempt $attempt/30); retrying in 10 seconds" >&2
+    sleep 10
+  done
+}
+apt_with_retry update -qq
+apt_with_retry install -y -qq git curl ca-certificates
+'''
+
+
 def clone_header(args, *, include_ucv):
     ucv = (f"git clone {q(UCV_REPO)} \"$UCV_REPOSITORY\"\n"
            f"git -C \"$UCV_REPOSITORY\" checkout --detach {q(args.ucv_ref)}\n") if include_ucv else ""
@@ -65,8 +89,7 @@ WORK=/workspace/sd-ucv-duration
 SD_REPOSITORY="$WORK/sd-repository"
 UCV_REPOSITORY="$WORK/ucv-repository"
 mkdir -p "$WORK"
-apt-get update -qq
-apt-get install -y -qq git curl ca-certificates
+{apt_bootstrap()}
 git clone {q(SD_REPO)} "$SD_REPOSITORY"
 git -C "$SD_REPOSITORY" checkout --detach {q(args.repo_ref)}
 {ucv}'''
@@ -258,7 +281,7 @@ def wait_many(args, names):
             if state == "SUCCEEDED":
                 pending.remove(name)
             elif state in {"FAILED", "DELETION_IN_PROGRESS"}:
-                raise RuntimeError(f"{name} failed; aggregation was not launched")
+                raise RuntimeError(f"Batch job {name} ended in state {state}; inspect its task logs")
         if pending:
             time.sleep(30)
 

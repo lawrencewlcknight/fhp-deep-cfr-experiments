@@ -192,6 +192,79 @@ def cloud_args():
         ucv_ref=batch.DEFAULT_UCV_REF,max_hours=12,service_account="runner@test.iam.gserviceaccount.com",resume=False)
 
 
+@pytest.mark.parametrize("operation", ["update", "install"])
+@pytest.mark.parametrize("failures", [0, 2, 30])
+def test_apt_bootstrap_retries_and_preserves_failure_status(tmp_path, operation, failures):
+    # Run the generated shell with harmless function stubs: no real apt, sleep,
+    # network, package writes, or lock-file removal occurs in this test.
+    log = tmp_path / "apt-calls.txt"
+    script = f'''set -Eeuo pipefail
+remaining={failures}
+apt-get() {{
+  [[ "$1" == -o && "$2" == DPkg::Lock::Timeout=10 ]] || return 64
+  printf '%s\\n' "$3" >> "$APT_TEST_LOG"
+  if [[ "$3" == {operation} && "$remaining" -gt 0 ]]; then
+    remaining=$((remaining - 1))
+    return 100
+  fi
+}}
+sleep() {{ [[ "$1" == 10 ]]; }}
+{batch.apt_bootstrap()}
+'''
+    process = subprocess.run(["bash"], input=script, text=True, capture_output=True,
+                             env=dict(os.environ, APT_TEST_LOG=str(log)), timeout=5)
+    calls = log.read_text().splitlines()
+    exhausted = failures == 30
+    assert process.returncode == (100 if exhausted else 0)
+    assert calls.count(operation) == (30 if exhausted else failures + 1)
+    assert calls.count("install" if operation == "update" else "update") == (
+        0 if exhausted and operation == "update" else 1)
+    assert process.stderr.count("retrying in 10 seconds") == min(failures, 29)
+    assert ("failed after 30 attempts (exit 100)" in process.stderr) == exhausted
+
+
+@pytest.mark.parametrize("stage", ["controller", *batch.STAGES])
+def test_every_duration_stage_uses_retrying_bootstrap(stage):
+    script = batch.job_config(cloud_args(), stage)["taskGroups"][0]["taskSpec"]["runnables"][0]["script"]["text"]
+    assert batch.apt_bootstrap() in script
+    subprocess.run(["bash", "-n"], input=script, text=True, check=True)
+
+
+@pytest.mark.parametrize("stage", ["eval24", "aggregate"])
+@pytest.mark.parametrize("state", ["FAILED", "DELETION_IN_PROGRESS"])
+def test_wait_reports_actual_failed_job_and_state(monkeypatch, stage, state):
+    monkeypatch.setattr(batch, "cloud", lambda *a, **kw: SimpleNamespace(stdout=state))
+    name = f"sd-ucv-duration-test-{stage}"
+    with pytest.raises(RuntimeError, match=f"Batch job {name} ended in state {state}") as error:
+        batch.wait_many(cloud_args(), [name])
+    assert "aggregation was not launched" not in str(error.value)
+
+
+def test_controller_resume_only_aggregates_completed_cohorts(monkeypatch):
+    args = cloud_args()
+    args.action, args.resume = "orchestrate", True
+    monkeypatch.setattr(batch, "parse_args", lambda: (None, args))
+    monkeypatch.setattr(batch, "check_sources", lambda args: None)
+    checked, submitted, waited = [], [], []
+
+    def exists(args, uri):
+        checked.append(uri)
+        return True
+
+    def submit(args, stage, **kwargs):
+        submitted.append(stage)
+        return "aggregate-job"
+
+    monkeypatch.setattr(batch, "objects_exist", exists)
+    monkeypatch.setattr(batch, "submit", submit)
+    monkeypatch.setattr(batch, "wait_many", lambda args, names: waited.append(names))
+    batch.main()
+    assert checked == [f"{args.bucket}/{args.run_id}/stages/{cohort}/SUCCESS.json"
+                       for cohort in ("24h", "48h")]
+    assert submitted == ["aggregate"]
+    assert waited == [[], ["aggregate-job"]]
+
+
 def test_cloud_plan_two_evaluators_and_only_playable_policy_inputs(tmp_path):
     config = batch.job_config(cloud_args(), "eval24")
     assert config["allocationPolicy"]["instances"][0]["policy"]["machineType"] == "n2-standard-8"
